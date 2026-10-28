@@ -31,14 +31,14 @@ data class MovieSubject(
     val name: String,
     val poster: String,
     val description: String = "",
-    val rating: String = "8.5",
-    val year: String = "2026",
+    val rating: String? = null,
+    val year: String? = null,
     val genres: List<String> = emptyList(),
     val isTvShow: Boolean = false,
     val totalSeasons: Int = 1,
-    val duration: String = "120 min",
+    val duration: String? = null,
     val cast: List<CastMember> = emptyList(),
-    val dubs: List<String> = listOf("English", "Hindi"),
+    val dubs: List<String> = emptyList(),
     val seasonList: List<SeasonInfo> = emptyList(),
     val resourceDetectors: List<ResourceDetector> = emptyList()
 )
@@ -221,10 +221,15 @@ class MovieSubjectAdapter {
             posterUrl = "https:$posterUrl"
         }
 
-        val rating = (item["imdbRatingValue"] ?: item["imdbRate"] ?: item["starRating"] ?: item["score"] ?: "8.5").toString()
+        val ratingRaw = (item["imdbRatingValue"] ?: item["imdbRate"] ?: item["starRating"] ?: item["score"] ?: map["rating"])?.toString()?.trim()
+        val rating = if (ratingRaw.isNullOrEmpty() || ratingRaw.equals("null", ignoreCase = true) || ratingRaw == "0" || ratingRaw == "0.0") null else ratingRaw
         
-        val releaseDate = (item["releaseDate"] ?: item["releaseTime"] ?: item["year"] ?: "2026").toString()
-        val year = if (releaseDate.length >= 4) releaseDate.substring(0, 4) else "2026"
+        val releaseDateRaw = (item["releaseDate"] ?: item["releaseTime"] ?: item["year"] ?: map["year"])?.toString()?.trim()
+        val year = when {
+            releaseDateRaw.isNullOrEmpty() || releaseDateRaw.equals("null", ignoreCase = true) -> null
+            releaseDateRaw.length >= 4 -> releaseDateRaw.substring(0, 4)
+            else -> releaseDateRaw
+        }
 
         val subjectTypeVal = (item["subjectType"] ?: item["type"] ?: item["subject_type"])
         val subjectType = when (subjectTypeVal) {
@@ -247,8 +252,15 @@ class MovieSubjectAdapter {
             }
         }
 
-        val durationVal = (item["duration"] ?: item["runtime"] ?: item["minute"] ?: "120 min")
-        val duration = if (durationVal is Number) "${durationVal.toInt()} min" else durationVal.toString()
+        val durationVal = item["duration"] ?: item["runtime"] ?: item["minute"] ?: map["duration"]
+        val duration = when {
+            durationVal == null || durationVal.toString().isBlank() || durationVal.toString().equals("null", ignoreCase = true) || durationVal == 0 || durationVal == "0" -> null
+            durationVal is Number -> if (durationVal.toInt() > 0) "${durationVal.toInt()} min" else null
+            else -> {
+                val str = durationVal.toString().trim()
+                if (str.all { it.isDigit() }) "$str min" else str
+            }
+        }
 
         val description = (item["description"] ?: "").toString()
 
@@ -326,6 +338,22 @@ class MovieSubjectAdapter {
             }
         }
 
+        // Dubs mapping
+        val dubsList = mutableListOf<String>()
+        val dubsRaw = item["dubs"] ?: item["audioList"] ?: item["languages"] ?: item["audio"] ?: map["dubs"]
+        if (dubsRaw is List<*>) {
+            for (d in dubsRaw) {
+                if (d is Map<*, *>) {
+                    val lanName = (d["lanName"] ?: d["name"] ?: d["language"] ?: "").toString().trim()
+                    if (lanName.isNotEmpty()) dubsList.add(lanName)
+                } else if (d != null && d.toString().isNotBlank()) {
+                    dubsList.add(d.toString().trim())
+                }
+            }
+        } else if (dubsRaw is String && dubsRaw.isNotBlank()) {
+            dubsList.addAll(dubsRaw.split(",").map { it.trim() }.filter { it.isNotEmpty() })
+        }
+
         return MovieSubject(
             id = id,
             name = name,
@@ -338,6 +366,7 @@ class MovieSubjectAdapter {
             totalSeasons = totalSeasons,
             duration = duration,
             cast = castList,
+            dubs = dubsList,
             seasonList = seasonList,
             resourceDetectors = detectorsList
         )
@@ -357,6 +386,7 @@ class MovieSubjectAdapter {
             "totalSeasons" to subject.totalSeasons,
             "duration" to subject.duration,
             "cast" to subject.cast,
+            "dubs" to subject.dubs,
             "seasonList" to subject.seasonList.map { s ->
                 mapOf(
                     "season" to s.season,

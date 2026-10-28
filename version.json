@@ -1,7 +1,7 @@
 {
-  "versionName": "3.0",
-  "versionCode": 4,
-  "forceUpdate": false,
-  "changelog": "• Added multiple video download option\n• Improved download function",
-  "downloadUrl": "https://github.com/solo12345689/Genga-World/releases/download/v3.0/GengaWorld.apk"
+  "versionName": "4.0",
+  "versionCode": 5,
+  "forceUpdate": true,
+  "changelog": "• App Rebranding: New name & modern brand logo\n• Added Live TV section with Global channels\n• Improved subtitles",
+  "downloadUrl": "https://github.com/solo12345689/AnyFilm/releases/download/v4.0/AnyFilm.apk"
 }

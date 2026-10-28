@@ -9,8 +9,8 @@ data class FavoriteEntity(
     val name: String,
     val poster: String,
     val isTvShow: Boolean,
-    val rating: String,
-    val year: String,
+    val rating: String? = null,
+    val year: String? = null,
     val addedAt: Long = System.currentTimeMillis()
 )
 

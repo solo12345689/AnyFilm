@@ -93,7 +93,7 @@ class CastForegroundService : Service() {
 
         try {
             val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
-            wakeLock = powerManager?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "GengaWorld:CastWakeLock")?.apply {
+            wakeLock = powerManager?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AnyFilm:CastWakeLock")?.apply {
                 setReferenceCounted(false)
                 acquire(10 * 60 * 60 * 1000L) // Max 10 hours
             }
@@ -105,7 +105,7 @@ class CastForegroundService : Service() {
                 @Suppress("DEPRECATION")
                 WifiManager.WIFI_MODE_FULL_HIGH_PERF
             }
-            wifiLock = wifiManager?.createWifiLock(lockMode, "GengaWorld:CastWifiLock")?.apply {
+            wifiLock = wifiManager?.createWifiLock(lockMode, "AnyFilm:CastWifiLock")?.apply {
                 setReferenceCounted(false)
                 acquire()
             }
@@ -129,7 +129,7 @@ class CastForegroundService : Service() {
 
     private fun buildNotification(title: String): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Genga World")
+            .setContentTitle("AnyFilm")
             .setContentText("Casting $title to TV")
             .setSmallIcon(R.mipmap.ic_launcher)
             .setOngoing(true)

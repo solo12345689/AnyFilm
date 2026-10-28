@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -20,6 +21,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
@@ -42,6 +44,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
@@ -90,10 +95,10 @@ fun downloadVideo(context: android.content.Context, url: String, title: String, 
             // 1. Instant Direct HTTP download (saves in 1-2 seconds)
             kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
                 try {
-                    val gengaDir = java.io.File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES), "Genga World")
-                    if (!gengaDir.exists()) gengaDir.mkdirs()
-                    val titlePoster = java.io.File(gengaDir, "$safeTitle.jpg")
-                    val showPoster = if (safeShowName.isNotEmpty() && safeShowName != safeTitle) java.io.File(gengaDir, "$safeShowName.jpg") else null
+                    val anyFilmDir = java.io.File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES), "AnyFilm")
+                    if (!anyFilmDir.exists()) anyFilmDir.mkdirs()
+                    val titlePoster = java.io.File(anyFilmDir, "$safeTitle.jpg")
+                    val showPoster = if (safeShowName.isNotEmpty() && safeShowName != safeTitle) java.io.File(anyFilmDir, "$safeShowName.jpg") else null
 
                     val conn = (java.net.URL(posterUrl).openConnection() as java.net.HttpURLConnection).apply {
                         connectTimeout = 6000
@@ -115,16 +120,16 @@ fun downloadVideo(context: android.content.Context, url: String, title: String, 
                 val posterRequest = android.app.DownloadManager.Request(android.net.Uri.parse(posterUrl))
                 posterRequest.setTitle("$title Poster")
                 posterRequest.setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_HIDDEN)
-                posterRequest.setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_MOVIES, "Genga World/$safeTitle.jpg")
+                posterRequest.setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_MOVIES, "AnyFilm/$safeTitle.jpg")
                 manager.enqueue(posterRequest)
 
                 if (safeShowName.isNotEmpty() && safeShowName != safeTitle) {
-                    val showPosterFile = java.io.File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES), "Genga World/$safeShowName.jpg")
+                    val showPosterFile = java.io.File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES), "AnyFilm/$safeShowName.jpg")
                     if (!showPosterFile.exists()) {
                         val showPosterRequest = android.app.DownloadManager.Request(android.net.Uri.parse(posterUrl))
                         showPosterRequest.setTitle("$safeShowName Poster")
                         showPosterRequest.setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_HIDDEN)
-                        showPosterRequest.setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_MOVIES, "Genga World/$safeShowName.jpg")
+                        showPosterRequest.setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_MOVIES, "AnyFilm/$safeShowName.jpg")
                         manager.enqueue(showPosterRequest)
                     }
                 }
@@ -136,7 +141,7 @@ fun downloadVideo(context: android.content.Context, url: String, title: String, 
         request.setTitle(title)
         request.setDescription("Downloading...")
         request.setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-        request.setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_MOVIES, "Genga World/$fileName")
+        request.setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_MOVIES, "AnyFilm/$fileName")
         manager.enqueue(request)
         if (showToast) {
             android.widget.Toast.makeText(context, "Download started...", android.widget.Toast.LENGTH_SHORT).show()
@@ -328,26 +333,23 @@ fun SplashScreen(
                 .alpha(alphaAnim)
                 .scale(scaleAnim)
         ) {
-            // App Icon in clean circular frame
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier
-                    .size(96.dp)
-                    .clip(CircleShape)
-                    .background(ObsidianCard)
-            ) {
-                androidx.compose.foundation.Image(
-                    painter = painterResource(id = R.drawable.ic_launcher_fg),
-                    contentDescription = "Genga World Logo",
-                    modifier = Modifier.size(80.dp)
-                )
-            }
+            // Standalone App Logo sitting cleanly on dark background
+            androidx.compose.foundation.Image(
+                painter = painterResource(id = R.drawable.ic_popup_logo),
+                contentDescription = "AnyFilm Logo",
+                modifier = Modifier.size(110.dp)
+            )
 
             Spacer(modifier = Modifier.height(20.dp))
 
             // Cinematic App Title
             Text(
-                text = "GENGA WORLD",
+                text = buildAnnotatedString {
+                    append("ANY")
+                    withStyle(SpanStyle(color = Color(0xFFFF2A6D))) {
+                        append("FILM")
+                    }
+                },
                 fontSize = 24.sp,
                 fontWeight = FontWeight.ExtraBold,
                 letterSpacing = 3.sp,
@@ -590,7 +592,7 @@ fun TelegramJoinDialog(
                 .fillMaxWidth(0.86f)
                 .wrapContentHeight(),
             shape = RoundedCornerShape(24.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1F24)),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF1C1D22)),
             elevation = CardDefaults.cardElevation(defaultElevation = 12.dp)
         ) {
             Column(
@@ -600,18 +602,25 @@ fun TelegramJoinDialog(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
-                // App Logo
+                // App Logo sitting cleanly on dark background
                 Image(
-                    painter = painterResource(id = R.drawable.ic_launcher_fg),
-                    contentDescription = "Genga World Logo",
-                    modifier = Modifier.size(68.dp)
+                    painter = painterResource(id = R.drawable.ic_popup_logo),
+                    contentDescription = "AnyFilm Logo",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.size(76.dp)
                 )
 
                 Spacer(modifier = Modifier.height(18.dp))
 
                 // Title
                 Text(
-                    text = "Join the Genga Family",
+                    text = buildAnnotatedString {
+                        append("Join the Any")
+                        withStyle(SpanStyle(color = Color(0xFFFF2A6D))) {
+                            append("Film")
+                        }
+                        append(" Family")
+                    },
                     color = Color.White,
                     fontSize = 20.sp,
                     fontWeight = FontWeight.Bold,
@@ -623,7 +632,7 @@ fun TelegramJoinDialog(
                 // Subtitle / Description
                 Text(
                     text = "Be a special member of our Telegram family \u2014 get early access, request titles, and hear about new features first.",
-                    color = Color(0xFFB0B3B8),
+                    color = Color(0xFFA6A6B0),
                     fontSize = 13.5.sp,
                     lineHeight = 19.sp,
                     textAlign = TextAlign.Center
@@ -644,25 +653,37 @@ fun TelegramJoinDialog(
                     },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(48.dp),
+                        .height(48.dp)
+                        .background(
+                            brush = androidx.compose.ui.graphics.Brush.horizontalGradient(
+                                colors = listOf(Color(0xFF7C3AED), Color(0xFFE130CF))
+                            ),
+                            shape = RoundedCornerShape(12.dp)
+                        ),
                     shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0EA2DE))
+                    colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
+                    contentPadding = PaddingValues()
                 ) {
-                    Icon(
-                        imageVector = Icons.Filled.Send,
-                        contentDescription = "Telegram",
-                        tint = Color.White,
-                        modifier = Modifier
-                            .size(18.dp)
-                            .rotate(-25f)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Join Telegram",
-                        color = Color.White,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Send,
+                            contentDescription = "Telegram",
+                            tint = Color.White,
+                            modifier = Modifier
+                                .size(18.dp)
+                                .rotate(-25f)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Join Telegram",
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(14.dp))
@@ -673,7 +694,7 @@ fun TelegramJoinDialog(
                 ) {
                     Text(
                         text = "Maybe later",
-                        color = Color(0xFF8E8E93),
+                        color = Color(0xFF92929D),
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Medium
                     )
@@ -704,19 +725,12 @@ fun ForceUpdateFullScreen(
             verticalArrangement = Arrangement.Center,
             modifier = Modifier.fillMaxWidth()
         ) {
-            // App Logo with glowing red pulse
-            Box(
-                modifier = Modifier
-                    .size(80.dp)
-                    .background(CinematicRed.copy(alpha = 0.15f), shape = CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
-                Image(
-                    painter = painterResource(id = R.drawable.ic_launcher_fg),
-                    contentDescription = "Genga World",
-                    modifier = Modifier.size(56.dp)
-                )
-            }
+            // Standalone App Logo sitting cleanly on dark background
+            Image(
+                painter = painterResource(id = R.drawable.ic_popup_logo),
+                contentDescription = "AnyFilm",
+                modifier = Modifier.size(100.dp)
+            )
 
             Spacer(modifier = Modifier.height(24.dp))
 
@@ -1006,11 +1020,43 @@ fun MainContent(viewModel: MovieViewModel) {
     val cooldownPeriodMillis = 168L * 60 * 60 * 1000 // 168 hours (7 days)
     val shouldPromptTelegram = remember { (System.currentTimeMillis() - lastShownMillis) >= cooldownPeriodMillis }
     var showTelegramDialog by rememberSaveable { mutableStateOf(shouldPromptTelegram) }
+    var lastBackPressTime by remember { mutableStateOf(0L) }
+
+    // Back navigation across tabs
+    BackHandler(enabled = activeTab == "manage_categories" || activeTab == "history") {
+        activeTab = "settings"
+    }
+
+    BackHandler(enabled = activeTab != "home" && activeTab != "manage_categories" && activeTab != "history") {
+        activeTab = "home"
+    }
+
+    // Cancel loading stream links on back
+    BackHandler(enabled = viewModel.isPlaybackLoading) {
+        viewModel.isPlaybackLoading = false
+    }
+
+    // Double-tap back on home screen to exit app safely
+    BackHandler(
+        enabled = activeTab == "home" &&
+            viewModel.selectedSubject == null &&
+            viewModel.playInfo == null &&
+            viewModel.playingDownloadedFile == null &&
+            !viewModel.isPlaybackLoading
+    ) {
+        val currentTime = System.currentTimeMillis()
+        if (currentTime - lastBackPressTime < 2000L) {
+            (context as? android.app.Activity)?.finish()
+        } else {
+            lastBackPressTime = currentTime
+            android.widget.Toast.makeText(context, "Press back again to exit", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(
             bottomBar = {
-                if (viewModel.playInfo == null && viewModel.playingDownloadedFile == null) {
+                if (viewModel.playInfo == null && viewModel.playingDownloadedFile == null && !viewModel.isLiveTvPlaying) {
                     NavigationBar(
                         containerColor = ObsidianDark,
                         tonalElevation = 8.dp
@@ -1045,10 +1091,10 @@ fun MainContent(viewModel: MovieViewModel) {
                                 modifier = Modifier.testTag("nav_search")
                             )
                             NavigationBarItem(
-                                selected = activeTab == "watchlist",
-                                onClick = { activeTab = "watchlist" },
-                                icon = { Icon(if (activeTab == "watchlist") Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder, contentDescription = "Watchlist") },
-                                label = { Text("Watchlist", fontSize = 11.sp) },
+                                selected = activeTab == "livetv",
+                                onClick = { activeTab = "livetv" },
+                                icon = { Icon(if (activeTab == "livetv") Icons.Filled.LiveTv else Icons.Outlined.LiveTv, contentDescription = "Live TV") },
+                                label = { Text("Live TV", fontSize = 11.sp) },
                                 colors = NavigationBarItemDefaults.colors(
                                     selectedIconColor = CinematicRed,
                                     selectedTextColor = CinematicRed,
@@ -1056,7 +1102,7 @@ fun MainContent(viewModel: MovieViewModel) {
                                     unselectedIconColor = TextSecondary,
                                     unselectedTextColor = TextSecondary
                                 ),
-                                modifier = Modifier.testTag("nav_watchlist")
+                                modifier = Modifier.testTag("nav_livetv")
                             )
                         }
 
@@ -1098,23 +1144,31 @@ fun MainContent(viewModel: MovieViewModel) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(innerPadding)
+                    .padding(if (viewModel.isLiveTvPlaying) PaddingValues(0.dp) else innerPadding)
             ) {
                 when (activeTab) {
                     "home" -> HomeScreen(viewModel)
                     "search" -> SearchScreen(viewModel)
-                    "watchlist" -> WatchlistScreen(viewModel)
+                    "livetv" -> LiveTvScreen(viewModel)
+                    "watchlist" -> WatchlistScreen(
+                        viewModel,
+                        onBack = { activeTab = "settings" }
+                    )
                     "download" -> DownloadScreen(viewModel)
                     "settings" -> SettingsScreen(
                         viewModel, 
                         onNavigateToHistory = { activeTab = "history" },
+                        onNavigateToWatchlist = { activeTab = "watchlist" },
                         onNavigateToManageCategories = { activeTab = "manage_categories" }
                     )
                     "manage_categories" -> ManageCategoriesScreen(
                         viewModel,
                         onBack = { activeTab = "settings" }
                     )
-                    "history" -> HistoryScreen(viewModel)
+                    "history" -> HistoryScreen(
+                        viewModel,
+                        onBack = { activeTab = "settings" }
+                    )
                 }
             }
         }
@@ -1662,7 +1716,7 @@ fun MovieGridItem(movie: MovieSubject, showRating: Boolean = false, onClick: () 
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Filled.Star, contentDescription = "Rating", tint = AccentAmber, modifier = Modifier.size(10.dp))
                         Spacer(modifier = Modifier.width(2.dp))
-                        Text(movie.rating, fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        Text(movie.rating ?: "Not available", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color.White)
                     }
                 }
             }
@@ -1677,7 +1731,7 @@ fun MovieGridItem(movie: MovieSubject, showRating: Boolean = false, onClick: () 
             overflow = TextOverflow.Ellipsis
         )
         Text(
-            text = movie.year,
+            text = movie.year ?: "Not available",
             fontSize = 11.sp,
             color = TextSecondary
         )
@@ -1693,6 +1747,13 @@ fun SearchScreen(viewModel: MovieViewModel) {
 
     LaunchedEffect(viewModel.customCountryIso) {
         viewModel.loadSearchSuggestions()
+    }
+
+    BackHandler(enabled = searchInput.isNotEmpty()) {
+        searchInput = ""
+        isSearchSubmitted = false
+        viewModel.searchMovies("")
+        focusManager.clearFocus()
     }
 
     Column(
@@ -1854,9 +1915,9 @@ fun SearchScreen(viewModel: MovieViewModel) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Icon(Icons.Filled.Star, contentDescription = "Rating", tint = AccentAmber, modifier = Modifier.size(14.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text(movie.rating, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                                Text(movie.rating ?: "Not available", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
                                 Spacer(modifier = Modifier.width(12.dp))
-                                Text(movie.year, fontSize = 12.sp, color = TextSecondary)
+                                Text(movie.year ?: "Not available", fontSize = 12.sp, color = TextSecondary)
                             }
                         }
                     }
@@ -1867,8 +1928,12 @@ fun SearchScreen(viewModel: MovieViewModel) {
 }
 
 @Composable
-fun WatchlistScreen(viewModel: MovieViewModel) {
+fun WatchlistScreen(viewModel: MovieViewModel, onBack: () -> Unit = {}) {
     val favorites by viewModel.favoritesList.collectAsState()
+
+    BackHandler {
+        onBack()
+    }
 
     LaunchedEffect(Unit) {
         viewModel.refreshWatchlist()
@@ -1880,7 +1945,16 @@ fun WatchlistScreen(viewModel: MovieViewModel) {
             .background(ObsidianDark)
             .padding(16.dp)
     ) {
-        Text("My Watchlist", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = TextPrimary, modifier = Modifier.padding(bottom = 16.dp))
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(bottom = 16.dp)
+        ) {
+            IconButton(onClick = onBack, modifier = Modifier.size(36.dp)) {
+                Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = TextPrimary)
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("My Watchlist", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+        }
 
         if (favorites.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -1925,7 +1999,7 @@ fun WatchlistScreen(viewModel: MovieViewModel) {
                         Spacer(modifier = Modifier.width(16.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(movie.name, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
-                            Text(movie.year + " • " + if (movie.isTvShow) "TV Show" else "Movie", fontSize = 13.sp, color = TextSecondary)
+                            Text((movie.year ?: "Not available") + " • " + if (movie.isTvShow) "TV Show" else "Movie", fontSize = 13.sp, color = TextSecondary)
                         }
                         IconButton(onClick = {
                             val subject = MovieSubject(id = movie.id, name = movie.name, poster = movie.poster)
@@ -1941,7 +2015,7 @@ fun WatchlistScreen(viewModel: MovieViewModel) {
 }
 
 @Composable
-fun HistoryScreen(viewModel: MovieViewModel) {
+fun HistoryScreen(viewModel: MovieViewModel, onBack: () -> Unit = {}) {
     val history by viewModel.historyList.collectAsState()
     var expandedSubjectId by remember { mutableStateOf<String?>(null) }
 
@@ -1951,13 +2025,26 @@ fun HistoryScreen(viewModel: MovieViewModel) {
         }
     }
 
+    BackHandler {
+        onBack()
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(ObsidianDark)
             .padding(16.dp)
     ) {
-        Text("Continue Watching", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = TextPrimary, modifier = Modifier.padding(bottom = 16.dp))
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(bottom = 16.dp)
+        ) {
+            IconButton(onClick = onBack, modifier = Modifier.size(36.dp)) {
+                Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = TextPrimary)
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Continue Watching", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+        }
 
         if (groupedHistory.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -2261,6 +2348,10 @@ fun DetailScreen(viewModel: MovieViewModel) {
     val subject = viewModel.selectedSubject ?: return
     val isFav by viewModel.isFavoriteFlow(subject.id).collectAsState(false)
 
+    BackHandler {
+        viewModel.selectedSubject = null
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -2351,10 +2442,10 @@ fun DetailScreen(viewModel: MovieViewModel) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Filled.Star, contentDescription = "Rating", tint = AccentAmber, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text(subject.rating, color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text(subject.rating ?: "Not available", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                         }
-                        Text(subject.year, color = TextSecondary, fontSize = 14.sp)
-                        Text(subject.duration, color = TextSecondary, fontSize = 14.sp)
+                        Text(subject.year ?: "Not available", color = TextSecondary, fontSize = 14.sp)
+                        Text(subject.duration ?: "Not available", color = TextSecondary, fontSize = 14.sp)
                     }
 
                     Spacer(modifier = Modifier.height(12.dp))
@@ -2374,6 +2465,25 @@ fun DetailScreen(viewModel: MovieViewModel) {
                                 )
                             }
                         }
+                    }
+
+                    // Audio Language / Dubs row
+                    val audioDisplay = when {
+                        subject.dubs.isNotEmpty() -> subject.dubs.joinToString(", ")
+                        subject.resourceDetectors.isNotEmpty() -> subject.resourceDetectors.joinToString(", ") { it.name }
+                        else -> "Not available"
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(top = 8.dp)
+                    ) {
+                        Icon(Icons.Filled.VolumeUp, contentDescription = "Audio Language", tint = TextSecondary, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Audio: $audioDisplay",
+                            fontSize = 12.sp,
+                            color = TextSecondary
+                        )
                     }
 
                     Spacer(modifier = Modifier.height(16.dp))
@@ -2604,6 +2714,27 @@ fun PlayerScreen(viewModel: MovieViewModel) {
     var doubleTapActionText by remember { mutableStateOf<String?>(null) }
     var doubleTapActionSide by remember { mutableStateOf<String?>(null) } // "left", "center", "right"
     var gestureAnimTrigger by remember { mutableStateOf(0L) }
+
+    BackHandler {
+        if (activeSheet != null) {
+            activeSheet = null
+        } else if (isDownloadSelectionMode) {
+            isDownloadSelectionMode = false
+        } else if (isFullscreen) {
+            val activity = context as? android.app.Activity
+            if (activity != null) {
+                activity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                activity.window.decorView.systemUiVisibility = android.view.View.SYSTEM_UI_FLAG_VISIBLE
+            }
+        } else {
+            viewModel.playInfo = null
+            val activity = context as? android.app.Activity
+            if (activity != null) {
+                activity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                activity.window.decorView.systemUiVisibility = android.view.View.SYSTEM_UI_FLAG_VISIBLE
+            }
+        }
+    }
 
     // Google Cast Session State & Listener
     var isCastConnected by remember { mutableStateOf(false) }
@@ -4356,7 +4487,10 @@ fun DownloadScreen(viewModel: MovieViewModel) {
                     } catch (e: Exception) { }
                 }
 
-                val dir = java.io.File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES), "Genga World")
+                val baseMovies = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES)
+                val primaryDir = java.io.File(baseMovies, "AnyFilm")
+                val legacyDir = java.io.File(baseMovies, "Genga World")
+                val dir = if (primaryDir.exists()) primaryDir else if (legacyDir.exists()) legacyDir else primaryDir
                 val scanned = if (dir.exists() && dir.isDirectory) {
                     dir.listFiles()?.filter { it.extension.equals("mp4", ignoreCase = true) }?.sortedBy { it.name } ?: emptyList()
                 } else {
@@ -4427,16 +4561,20 @@ fun DownloadScreen(viewModel: MovieViewModel) {
                             Text("Downloading...", color = CinematicRed, fontSize = 15.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 6.dp))
                         }
                         items(activeDownloads) { active ->
-                            val gengaDir = remember { java.io.File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES), "Genga World") }
+                            val anyFilmDir = remember {
+                                val base = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES)
+                                val primary = java.io.File(base, "AnyFilm")
+                                if (primary.exists()) primary else java.io.File(base, "Genga World")
+                            }
                             val safeActiveTitle = remember(active.title) { active.title.replace(Regex("[^a-zA-Z0-9.-]"), "_") }
                             val safeShowPrefix = remember(active.title) {
                                 val match = Regex("(.*?)(_S\\d+E\\d+.*|$)").find(safeActiveTitle)
                                 match?.groupValues?.get(1)?.trim() ?: safeActiveTitle
                             }
                             val activePosterFile = remember(active.title) {
-                                val titleFile = java.io.File(gengaDir, "$safeActiveTitle.jpg")
+                                val titleFile = java.io.File(anyFilmDir, "$safeActiveTitle.jpg")
                                 if (titleFile.exists()) titleFile else {
-                                    val showFile = java.io.File(gengaDir, "$safeShowPrefix.jpg")
+                                    val showFile = java.io.File(anyFilmDir, "$safeShowPrefix.jpg")
                                     if (showFile.exists()) showFile else null
                                 }
                             }
@@ -4581,16 +4719,20 @@ fun DownloadScreen(viewModel: MovieViewModel) {
                         items(groupedFiles.keys.toList()) { showName ->
                             val filesForShow = groupedFiles[showName] ?: emptyList()
                             val isExpanded = expandedShows.contains(showName)
-                            val gengaDir = remember { java.io.File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES), "Genga World") }
+                            val anyFilmDir = remember {
+                                val base = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES)
+                                val primary = java.io.File(base, "AnyFilm")
+                                if (primary.exists()) primary else java.io.File(base, "Genga World")
+                            }
                             val safeShowPrefix = remember(showName) { showName.replace(Regex("[^a-zA-Z0-9.-]"), "_") }
 
                             val posterFile = remember(showName, filesForShow) {
-                                val showLevel = java.io.File(gengaDir, "$safeShowPrefix.jpg")
+                                val showLevel = java.io.File(anyFilmDir, "$safeShowPrefix.jpg")
                                 if (showLevel.exists()) {
                                     showLevel
                                 } else {
                                     filesForShow.firstNotNullOfOrNull { f ->
-                                        val p = java.io.File(gengaDir, "${f.nameWithoutExtension}.jpg")
+                                        val p = java.io.File(anyFilmDir, "${f.nameWithoutExtension}.jpg")
                                         if (p.exists()) p else null
                                     }
                                 }
@@ -4657,11 +4799,11 @@ fun DownloadScreen(viewModel: MovieViewModel) {
                                         val singleFile = filesForShow.first()
                                         IconButton(onClick = {
                                             coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                                                val singlePoster = java.io.File(gengaDir, "${singleFile.nameWithoutExtension}.jpg")
+                                                val singlePoster = java.io.File(anyFilmDir, "${singleFile.nameWithoutExtension}.jpg")
                                                 if (singlePoster.exists()) singlePoster.delete()
-                                                val showPoster = java.io.File(gengaDir, "$safeShowPrefix.jpg")
+                                                val showPoster = java.io.File(anyFilmDir, "$safeShowPrefix.jpg")
                                                 if (showPoster.exists()) showPoster.delete()
-                                                gengaDir.listFiles()?.filter { it.extension.equals("jpg", ignoreCase = true) && it.nameWithoutExtension.startsWith(safeShowPrefix) }?.forEach { it.delete() }
+                                                anyFilmDir.listFiles()?.filter { it.extension.equals("jpg", ignoreCase = true) && it.nameWithoutExtension.startsWith(safeShowPrefix) }?.forEach { it.delete() }
                                                 singleFile.delete()
                                                 viewModel.scanDownloadedFiles()
                                             }
@@ -4700,11 +4842,11 @@ fun DownloadScreen(viewModel: MovieViewModel) {
                                                     coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                                                         if (filesForShow.size <= 1) {
                                                             // Last episode remaining: clean up posters
-                                                            val epPoster = java.io.File(gengaDir, "${file.nameWithoutExtension}.jpg")
+                                                            val epPoster = java.io.File(anyFilmDir, "${file.nameWithoutExtension}.jpg")
                                                             if (epPoster.exists()) epPoster.delete()
-                                                            val showPoster = java.io.File(gengaDir, "$safeShowPrefix.jpg")
+                                                            val showPoster = java.io.File(anyFilmDir, "$safeShowPrefix.jpg")
                                                             if (showPoster.exists()) showPoster.delete()
-                                                            gengaDir.listFiles()?.filter { it.extension.equals("jpg", ignoreCase = true) && it.nameWithoutExtension.startsWith(safeShowPrefix) }?.forEach { it.delete() }
+                                                            anyFilmDir.listFiles()?.filter { it.extension.equals("jpg", ignoreCase = true) && it.nameWithoutExtension.startsWith(safeShowPrefix) }?.forEach { it.delete() }
                                                         }
                                                         // When multiple episodes exist, ONLY delete the video file, preserving posters for the remaining episodes
                                                         file.delete()
@@ -4774,7 +4916,7 @@ fun DownloadScreen(viewModel: MovieViewModel) {
                         modifier = Modifier.padding(top = 2.dp, bottom = 16.dp)
                     )
 
-                    // 1. Genga World Internal Player
+                    // 1. AnyFilm Internal Player
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -4790,7 +4932,7 @@ fun DownloadScreen(viewModel: MovieViewModel) {
                         if (appIcon != null) {
                             AsyncImage(
                                 model = appIcon,
-                                contentDescription = "Genga World",
+                                contentDescription = "AnyFilm",
                                 modifier = Modifier
                                     .size(46.dp)
                                     .clip(RoundedCornerShape(10.dp)),
@@ -4810,7 +4952,7 @@ fun DownloadScreen(viewModel: MovieViewModel) {
                         Column(modifier = Modifier.weight(1f)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
-                                    text = "Genga World Player",
+                                    text = "AnyFilm Player",
                                     color = TextPrimary,
                                     fontSize = 15.sp,
                                     fontWeight = FontWeight.Bold
@@ -4968,6 +5110,17 @@ fun OfflinePlayerScreen(fileToPlay: java.io.File, onDismiss: () -> Unit) {
     val isOfflineFullscreen = offlineConfiguration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
     val offlineActivity = context as? android.app.Activity
     val isOfflineInPip = offlineActivity?.isInPictureInPictureMode ?: false
+
+    BackHandler {
+        if (isOfflineFullscreen) {
+            offlineActivity?.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            offlineActivity?.window?.decorView?.systemUiVisibility = android.view.View.SYSTEM_UI_FLAG_VISIBLE
+        } else {
+            offlineActivity?.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            offlineActivity?.window?.decorView?.systemUiVisibility = android.view.View.SYSTEM_UI_FLAG_VISIBLE
+            onDismiss()
+        }
+    }
 
     val exoPlayer = remember(fileToPlay) {
         androidx.media3.exoplayer.ExoPlayer.Builder(context).build().apply {
@@ -5368,7 +5521,7 @@ fun OfflinePlayerScreen(fileToPlay: java.io.File, onDismiss: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = {}, onNavigateToManageCategories: () -> Unit = {}) {
+fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = {}, onNavigateToWatchlist: () -> Unit = {}, onNavigateToManageCategories: () -> Unit = {}) {
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var otp by remember { mutableStateOf("") }
@@ -5379,6 +5532,7 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
 
     val context = LocalContext.current
     val history by viewModel.historyList.collectAsState()
+    val favorites by viewModel.favoritesList.collectAsState()
     
     val groupedHistory = remember(history) {
         history.groupBy { it.subjectId }.map { it.value.first() }
@@ -5389,6 +5543,10 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
             viewModel.checkUserSession()
             showLoginForm = false
         }
+    }
+
+    BackHandler(enabled = showLoginForm) {
+        showLoginForm = false
     }
 
     Box(
@@ -5476,7 +5634,7 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
                 horizontalAlignment = Alignment.Start,
                 verticalArrangement = Arrangement.Top
             ) {
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(4.dp))
 
                 // Profile Header Row (Avatar on Left, Nickname & ID on Right)
                 Row(
@@ -5497,7 +5655,7 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
                     if (viewModel.isLoggedIn) {
                         Box(
                             modifier = Modifier
-                                .size(70.dp)
+                                .size(50.dp)
                                 .background(ObsidianCard, shape = CircleShape)
                                 .clickable {
                                     photoPickerLauncher.launch("image/*")
@@ -5519,33 +5677,33 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
                                     imageVector = Icons.Filled.AccountCircle,
                                     contentDescription = "User Avatar",
                                     tint = CinematicRed,
-                                    modifier = Modifier.size(60.dp)
+                                    modifier = Modifier.size(42.dp)
                                 )
                             }
                         }
 
-                        Spacer(modifier = Modifier.width(16.dp))
+                        Spacer(modifier = Modifier.width(12.dp))
                     }
 
                     // Nickname and ID
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = if (viewModel.isLoggedIn && user?.nickname?.isNotEmpty() == true) user.nickname else "Log in to your account",
-                            fontSize = 20.sp,
+                            fontSize = 17.sp,
                             fontWeight = FontWeight.Bold,
                             color = TextPrimary
                         )
                         if (viewModel.isLoggedIn) {
-                            Spacer(modifier = Modifier.height(4.dp))
+                            Spacer(modifier = Modifier.height(2.dp))
                             Card(
                                 colors = CardDefaults.cardColors(containerColor = ObsidianCard),
                                 shape = RoundedCornerShape(4.dp)
                             ) {
                                 Text(
                                     text = "ID: ${if (user?.userId?.isNotEmpty() == true) user.userId else "00000000"}",
-                                    fontSize = 12.sp,
+                                    fontSize = 11.sp,
                                     color = TextSecondary,
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
                                 )
                             }
                         }
@@ -5555,14 +5713,16 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
                         Button(
                             onClick = { showLoginForm = true },
                             colors = ButtonDefaults.buttonColors(containerColor = CinematicRed),
-                            shape = RoundedCornerShape(8.dp)
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
+                            modifier = Modifier.height(34.dp)
                         ) {
-                            Text("Log In", fontWeight = FontWeight.Bold)
+                            Text("Log In", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                         }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(30.dp))
+                Spacer(modifier = Modifier.height(6.dp))
 
                 // Watch History Section
                 Card(
@@ -5573,14 +5733,14 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
                     shape = RoundedCornerShape(12.dp)
                 ) {
                     Column(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp)
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
                     ) {
                         // Title Row
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable { onNavigateToHistory() }
-                                .padding(horizontal = 16.dp),
+                                .padding(horizontal = 14.dp, vertical = 2.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
@@ -5589,41 +5749,64 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
                                     imageVector = Icons.Filled.History,
                                     contentDescription = "Watch History",
                                     tint = TextPrimary,
-                                    modifier = Modifier.size(20.dp)
+                                    modifier = Modifier.size(16.dp)
                                 )
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Text(
-                                    text = "Watch History",
-                                    fontSize = 16.sp,
-                                    color = TextPrimary,
-                                    fontWeight = FontWeight.Bold
-                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = "Watch History",
+                                            fontSize = 14.sp,
+                                            color = TextPrimary,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        if (groupedHistory.isNotEmpty()) {
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Box(
+                                                modifier = Modifier
+                                                    .background(Color.White.copy(alpha = 0.15f), RoundedCornerShape(4.dp))
+                                                    .padding(horizontal = 5.dp, vertical = 1.dp)
+                                            ) {
+                                                Text(
+                                                    text = "${groupedHistory.size}",
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = TextPrimary
+                                                )
+                                            }
+                                        }
+                                    }
+                                    Text(
+                                        text = if (groupedHistory.isNotEmpty()) "${groupedHistory.size} recently watched" else "View your watch history and progress",
+                                        fontSize = 11.sp,
+                                        color = TextSecondary
+                                    )
+                                }
                             }
                             Icon(
                                 imageVector = Icons.Filled.ChevronRight,
                                 contentDescription = "Navigate",
                                 tint = TextSecondary,
-                                modifier = Modifier.size(20.dp)
+                                modifier = Modifier.size(16.dp)
                             )
                         }
 
                         // History Posters Row
                         if (groupedHistory.isNotEmpty()) {
-                            Spacer(modifier = Modifier.height(16.dp))
+                            Spacer(modifier = Modifier.height(5.dp))
                             LazyRow(
                                 modifier = Modifier.fillMaxWidth(),
-                                contentPadding = PaddingValues(horizontal = 16.dp),
-                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                contentPadding = PaddingValues(horizontal = 14.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 items(groupedHistory.take(5)) { item ->
                                     Box(
                                         modifier = Modifier
-                                            .width(140.dp)
-                                            .height(80.dp)
-                                            .clip(RoundedCornerShape(8.dp))
+                                            .width(90.dp)
+                                            .height(50.dp)
+                                            .clip(RoundedCornerShape(6.dp))
                                             .background(Color.DarkGray)
                                             .clickable {
-                                                // Quick jump to detail could be added here
                                                 onNavigateToHistory()
                                             }
                                     ) {
@@ -5640,7 +5823,7 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
                                                 .background(
                                                     Brush.verticalGradient(
                                                         colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.8f)),
-                                                        startY = 50f
+                                                        startY = 30f
                                                     )
                                                 )
                                         )
@@ -5648,13 +5831,13 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
                                         Text(
                                             text = item.name,
                                             color = Color.White,
-                                            fontSize = 11.sp,
+                                            fontSize = 9.sp,
                                             fontWeight = FontWeight.Medium,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
                                             modifier = Modifier
                                                 .align(Alignment.BottomStart)
-                                                .padding(horizontal = 8.dp, vertical = 6.dp)
+                                                .padding(horizontal = 5.dp, vertical = 3.dp)
                                         )
                                     }
                                 }
@@ -5663,7 +5846,73 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
                     }
                 }
 
-                Spacer(modifier = Modifier.height(20.dp))
+                // My Watchlist Section
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp),
+                    colors = CardDefaults.cardColors(containerColor = ObsidianCard),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onNavigateToWatchlist() }
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Filled.Bookmark,
+                                contentDescription = "My Watchlist",
+                                tint = CinematicRed,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = "My Watchlist",
+                                        fontSize = 14.sp,
+                                        color = TextPrimary,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    if (favorites.isNotEmpty()) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Box(
+                                            modifier = Modifier
+                                                .background(CinematicRed.copy(alpha = 0.2f), RoundedCornerShape(4.dp))
+                                                .padding(horizontal = 5.dp, vertical = 1.dp)
+                                        ) {
+                                            Text(
+                                                text = "${favorites.size}",
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = CinematicRed
+                                            )
+                                        }
+                                    }
+                                }
+                                Text(
+                                    text = if (favorites.isNotEmpty()) "${favorites.size} saved" else "View your saved movies & series",
+                                    fontSize = 11.sp,
+                                    color = TextSecondary
+                                )
+                            }
+                        }
+                        Icon(
+                            imageVector = Icons.Filled.ChevronRight,
+                            contentDescription = "Navigate",
+                            tint = TextSecondary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
 
                 // Location / Region Selection Section
                 var showLocationDialog by remember { mutableStateOf(false) }
@@ -5679,7 +5928,7 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { showLocationDialog = true }
-                            .padding(horizontal = 16.dp, vertical = 16.dp),
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
@@ -5688,13 +5937,13 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
                                 imageVector = Icons.Filled.LocationOn,
                                 contentDescription = "Location",
                                 tint = TextPrimary,
-                                modifier = Modifier.size(20.dp)
+                                modifier = Modifier.size(16.dp)
                             )
-                            Spacer(modifier = Modifier.width(10.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
                             Column {
                                 Text(
                                     text = "Location",
-                                    fontSize = 16.sp,
+                                    fontSize = 14.sp,
                                     color = TextPrimary,
                                     fontWeight = FontWeight.Bold
                                 )
@@ -5705,7 +5954,7 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
                                         "ru" -> "Russia"
                                         else -> "India"
                                     },
-                                    fontSize = 12.sp,
+                                    fontSize = 11.sp,
                                     color = TextSecondary
                                 )
                             }
@@ -5713,7 +5962,7 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
                     }
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(6.dp))
 
                 // Manage Categories Section
                 Card(
@@ -5727,7 +5976,7 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { onNavigateToManageCategories() }
-                            .padding(horizontal = 16.dp, vertical = 16.dp),
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
@@ -5736,19 +5985,19 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
                                 imageVector = Icons.Filled.List,
                                 contentDescription = "Manage Categories",
                                 tint = TextPrimary,
-                                modifier = Modifier.size(20.dp)
+                                modifier = Modifier.size(16.dp)
                             )
-                            Spacer(modifier = Modifier.width(10.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
                             Column {
                                 Text(
                                     text = "Manage Categories",
-                                    fontSize = 16.sp,
+                                    fontSize = 14.sp,
                                     color = TextPrimary,
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
                                     text = "Add or remove Home Feed tabs",
-                                    fontSize = 12.sp,
+                                    fontSize = 11.sp,
                                     color = TextSecondary
                                 )
                             }
@@ -5757,12 +6006,12 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
                             imageVector = Icons.Filled.ChevronRight,
                             contentDescription = "Navigate",
                             tint = TextSecondary,
-                            modifier = Modifier.size(20.dp)
+                            modifier = Modifier.size(16.dp)
                         )
                     }
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(6.dp))
 
                 // Telegram Community Section
                 var showSettingsTelegramDialog by remember { mutableStateOf(false) }
@@ -5784,7 +6033,7 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { showSettingsTelegramDialog = true }
-                            .padding(horizontal = 16.dp, vertical = 16.dp),
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
@@ -5794,20 +6043,20 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
                                 contentDescription = "Telegram",
                                 tint = Color(0xFF0EA2DE),
                                 modifier = Modifier
-                                    .size(20.dp)
+                                    .size(16.dp)
                                     .rotate(-25f)
                             )
-                            Spacer(modifier = Modifier.width(10.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
                             Column {
                                 Text(
                                     text = "Join Telegram Channel",
-                                    fontSize = 16.sp,
+                                    fontSize = 14.sp,
                                     color = TextPrimary,
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
                                     text = "Get early access, requests & updates",
-                                    fontSize = 12.sp,
+                                    fontSize = 11.sp,
                                     color = TextSecondary
                                 )
                             }
@@ -5816,12 +6065,12 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
                             imageVector = Icons.Filled.ChevronRight,
                             contentDescription = "Navigate",
                             tint = TextSecondary,
-                            modifier = Modifier.size(20.dp)
+                            modifier = Modifier.size(16.dp)
                         )
                     }
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(6.dp))
 
                 // Check for Updates Section
                 Card(
@@ -5839,7 +6088,7 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
                                     Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
                                 }
                             }
-                            .padding(horizontal = 16.dp, vertical = 16.dp),
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
@@ -5848,13 +6097,13 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
                                 imageVector = Icons.Filled.SystemUpdate,
                                 contentDescription = "Check for Updates",
                                 tint = CinematicRed,
-                                modifier = Modifier.size(20.dp)
+                                modifier = Modifier.size(16.dp)
                             )
-                            Spacer(modifier = Modifier.width(10.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
                             Column {
                                 Text(
                                     text = "Check for Updates",
-                                    fontSize = 16.sp,
+                                    fontSize = 14.sp,
                                     color = TextPrimary,
                                     fontWeight = FontWeight.Bold
                                 )
@@ -5865,14 +6114,14 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
                                 }
                                 Text(
                                     text = if (viewModel.isCheckingUpdate) "Checking latest version..." else "Current: v$appVersion",
-                                    fontSize = 12.sp,
+                                    fontSize = 11.sp,
                                     color = TextSecondary
                                 )
                             }
                         }
                         if (viewModel.isCheckingUpdate) {
                             CircularProgressIndicator(
-                                modifier = Modifier.size(20.dp),
+                                modifier = Modifier.size(18.dp),
                                 color = CinematicRed,
                                 strokeWidth = 2.dp
                             )
@@ -5881,7 +6130,7 @@ fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = 
                                 imageVector = Icons.Filled.ChevronRight,
                                 contentDescription = "Check",
                                 tint = TextSecondary,
-                                modifier = Modifier.size(20.dp)
+                                modifier = Modifier.size(16.dp)
                             )
                         }
                     }

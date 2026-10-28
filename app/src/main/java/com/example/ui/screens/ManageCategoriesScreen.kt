@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -24,6 +25,7 @@ import com.example.ui.viewmodel.MovieViewModel
 val availableOptionalCategories = listOf(
     3 to "Education",
     4 to "Music",
+    9 to "18+",
     19 to "Western TV Series",
     23 to "Kids Movies",
     28 to "Nollywood",
@@ -40,6 +42,10 @@ fun ManageCategoriesScreen(
 ) {
     val activeCategories by viewModel.activeCategories.collectAsState()
     val activeIds = activeCategories.map { it.first }
+
+    BackHandler {
+        onBack()
+    }
 
     Scaffold(
         topBar = {

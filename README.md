@@ -1,6 +1,6 @@
-# Genga World
+# AnyFilm
 
-Genga World is a premium, modern Android client designed for browsing, discovering, and streaming movies, TV shows, and anime. Built using **Jetpack Compose**, **Material 3**, and **Media3 ExoPlayer**, the client runs a built-in high-performance HTTP server locally on the device to deliver smooth, signed, and ad-free playback experiences.
+AnyFilm is a premium, modern Android client designed for browsing, discovering, and streaming movies, TV shows, and anime. Built using **Jetpack Compose**, **Material 3**, and **Media3 ExoPlayer**, the client runs a built-in high-performance HTTP server locally on the device to deliver smooth, signed, and ad-free playback experiences.
 
 ---
 
@@ -53,11 +53,11 @@ The compiled, signed release package will be located at:
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=solo12345689%2Fgenga-world&type=date&legend=top-left">
+<a href="https://www.star-history.com/?repos=solo12345689%2FAnyFilm&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=solo12345689/genga-world&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=solo12345689/genga-world&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=solo12345689/genga-world&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=solo12345689/AnyFilm&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=solo12345689/AnyFilm&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=solo12345689/AnyFilm&type=date&legend=top-left" />
  </picture>
 </a>
 

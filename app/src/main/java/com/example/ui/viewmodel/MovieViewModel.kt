@@ -86,6 +86,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
     var playbackProgressMs by mutableStateOf(0L)
     var isPlaybackLoading by mutableStateOf(false)
     var mediaDurationMs by mutableStateOf(0L)
+    var isLiveTvPlaying by mutableStateOf(false)
 
 
     // Data lists
@@ -178,8 +179,8 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 // Endpoints: jsDelivr CDN first for speed & reliability, raw GitHub as fallback
                 val endpoints = listOf(
-                    String(android.util.Base64.decode("aHR0cHM6Ly9jZG4uanNkZWxpdnIubmV0L2doL3NvbG8xMjM0NTY4OS9HZW5nYS1Xb3JsZEBtYWluL3ZlcnNpb24uanNvbg==", android.util.Base64.DEFAULT), Charsets.UTF_8).trim(),
-                    String(android.util.Base64.decode("aHR0cHM6Ly9yYXcuZ2l0aHViaXNlcmNvbnRlbnQuY29tL3NvbG8xMjM0NTY4OS9HZW5nYS1Xb3JsZC9tYWluL3ZlcnNpb24uanNvbg==", android.util.Base64.DEFAULT), Charsets.UTF_8).trim()
+                    String(android.util.Base64.decode("aHR0cHM6Ly9jZG4uanNkZWxpdnIubmV0L2doL3NvbG8xMjM0NTY4OS9BbnlGaWxtQG1haW4vdmVyc2lvbi5qc29u", android.util.Base64.DEFAULT), Charsets.UTF_8).trim(),
+                    String(android.util.Base64.decode("aHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL3NvbG8xMjM0NTY4OS9BbnlGaWxtL21haW4vdmVyc2lvbi5qc29u", android.util.Base64.DEFAULT), Charsets.UTF_8).trim()
                 )
 
                 val client = okhttp3.OkHttpClient.Builder()
@@ -193,7 +194,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                         val finalUrl = if (targetUrl.contains("jsdelivr")) "$targetUrl?t=${System.currentTimeMillis()}" else targetUrl
                         val request = okhttp3.Request.Builder()
                             .url(finalUrl)
-                            .header("User-Agent", "GengaWorldApp")
+                            .header("User-Agent", "AnyFilmApp")
                             .header("Cache-Control", "no-cache")
                             .build()
 
@@ -305,7 +306,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
 
                 val request = okhttp3.Request.Builder()
                     .url(downloadUrl)
-                    .header("User-Agent", "GengaWorldApp")
+                    .header("User-Agent", "AnyFilmApp")
                     .build()
 
                 val response = client.newCall(request).execute()
@@ -419,10 +420,10 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
     fun scanDownloadedFiles() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val dir = java.io.File(
-                    android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES),
-                    "Genga World"
-                )
+                val baseDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES)
+                val primaryDir = java.io.File(baseDir, "AnyFilm")
+                val legacyDir = java.io.File(baseDir, "Genga World")
+                val dir = if (primaryDir.exists()) primaryDir else if (legacyDir.exists()) legacyDir else primaryDir
                 val files = if (dir.exists() && dir.isDirectory) {
                     dir.listFiles()?.filter { it.extension.equals("mp4", ignoreCase = true) }?.sortedBy { it.name } ?: emptyList()
                 } else {
@@ -1139,7 +1140,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
 
                 selectedStream = resolvedPlayInfo.streamList.firstOrNull()
                 val isDubSelected = selectedResource?.name?.contains("dub", ignoreCase = true) == true
-                selectedSubtitle = if (isDubSelected) null else resolvedPlayInfo.subTitleList.firstOrNull()
+                selectedSubtitle = if (isDubSelected) null else (resolvedPlayInfo.subTitleList.find { it.language.contains("eng", ignoreCase = true) } ?: resolvedPlayInfo.subTitleList.firstOrNull())
                 isPlaying = true
                 playInfo = resolvedPlayInfo
             } catch (e: Exception) {
@@ -1212,7 +1213,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
 
                 selectedStream = resolvedPlayInfo.streamList.firstOrNull()
                 val isDubSelected = selectedResource?.name?.contains("dub", ignoreCase = true) == true
-                selectedSubtitle = if (isDubSelected) null else resolvedPlayInfo.subTitleList.firstOrNull()
+                selectedSubtitle = if (isDubSelected) null else (resolvedPlayInfo.subTitleList.find { it.language.contains("eng", ignoreCase = true) } ?: resolvedPlayInfo.subTitleList.firstOrNull())
                 isPlaying = true
                 playInfo = resolvedPlayInfo
             } catch (e: Exception) {
@@ -1263,7 +1264,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                 playInfo = resolvedPlayInfo
                 selectedStream = resolvedPlayInfo.streamList.firstOrNull()
                 val isDubSelected = selectedResource?.name?.contains("dub", ignoreCase = true) == true
-                selectedSubtitle = if (isDubSelected) null else resolvedPlayInfo.subTitleList.firstOrNull()
+                selectedSubtitle = if (isDubSelected) null else (resolvedPlayInfo.subTitleList.find { it.language.contains("eng", ignoreCase = true) } ?: resolvedPlayInfo.subTitleList.firstOrNull())
                 isPlaying = true
             } catch (e: Exception) {
                 android.util.Log.e("MovieViewModel", "Failed to change resource", e)
@@ -1335,8 +1336,8 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                             name = sub.title,
                             poster = sub.cover?.get("url") ?: "",
                             isTvShow = sub.subjectType == 2,
-                            rating = sub.imdbRatingValue.ifEmpty { "0.0" },
-                            year = if (sub.releaseDate.length >= 4) sub.releaseDate.take(4) else ""
+                            rating = sub.imdbRatingValue.takeIf { it.isNotBlank() && it != "0" && it != "0.0" },
+                            year = if (sub.releaseDate.length >= 4) sub.releaseDate.take(4) else null
                         )
                     }
                     _cloudFavorites.value = favorites

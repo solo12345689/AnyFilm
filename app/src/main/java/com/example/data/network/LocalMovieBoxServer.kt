@@ -886,6 +886,9 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
                     try {
                         var isMovie = false
                         var subResourceId = subjectId
+                        var allDetectors: List<Map<String, Any?>> = emptyList()
+                        var allDubs: List<Map<String, Any?>> = emptyList()
+                        var mainSubjectId: String = subjectId
                         try {
                             val detailResponseRaw = makeOfficialRequest("GET", "/wefeed-mobile-bff/subject-api/get", mapOf("subjectId" to subjectId))
                             val detailResponse = parseJsonToMap(detailResponseRaw)
@@ -894,6 +897,16 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
                             isMovie = type.toString().toDoubleOrNull()?.toInt() == 1
                             
                             val detectors = detailData?.get("resourceDetectors") as? List<Map<String, Any?>> ?: emptyList()
+                            allDetectors = detectors
+                            allDubs = detailData?.get("dubs") as? List<Map<String, Any?>> ?: emptyList()
+
+                            val origDub = allDubs.find { 
+                                it["original"] == true || 
+                                it["original"]?.toString()?.toBoolean() == true || 
+                                (it["lanName"] ?: "").toString().contains("orig", ignoreCase = true) 
+                            }
+                            mainSubjectId = origDub?.get("subjectId")?.toString() ?: subjectId
+
                             if (detectors.isNotEmpty()) {
                                 subResourceId = detectors[0]["resourceId"]?.toString() ?: subjectId
                             }
@@ -1091,35 +1104,108 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
 
                         val subtitlesMapped = mutableListOf<Map<String, Any?>>()
                         
-                        // 1. Fetch external subtitles (get-ext-captions)
-                        try {
-                            val subParams = mutableMapOf(
-                                "subjectId" to finalSubjectId,
-                                "resourceId" to subResourceId
-                            )
-                            if (!isMovie) {
-                                subParams["se"] = season
-                                subParams["ep"] = episode
+                        // Helper to fetch and extract captions for a given subjectId + resourceId
+                        fun fetchCaptions(targetSubId: String, targetResId: String, extraLan: String? = null) {
+                            try {
+                                val subParams = mutableMapOf(
+                                    "subjectId" to targetSubId,
+                                    "resourceId" to targetResId
+                                )
+                                if (!isMovie) {
+                                    subParams["se"] = season
+                                    subParams["ep"] = episode
+                                }
+                                if (!extraLan.isNullOrEmpty()) {
+                                    subParams["lan"] = extraLan
+                                }
+                                val subResponseRaw = makeOfficialRequest("GET", "/wefeed-mobile-bff/subject-api/get-ext-captions", subParams)
+                                val subResponseMap = parseJsonToMap(subResponseRaw)
+                                val subData = subResponseMap["data"] as? Map<String, Any?> ?: emptyMap()
+                                val extList = (subData["extCaptions"] ?: subData["list"] ?: emptyList<Any?>()) as? List<Map<String, Any?>> ?: emptyList()
+                                
+                                for (sub in extList) {
+                                    val lan = sub["lan"]?.toString() ?: ""
+                                    val lanName = sub["lanName"]?.toString() ?: ""
+                                    val subUrl = sub["url"]?.toString() ?: ""
+                                    if (subUrl.isNotEmpty() && !subtitlesMapped.any { it["url"] == subUrl }) {
+                                        subtitlesMapped.add(mapOf(
+                                            "lan" to lan,
+                                            "lanName" to lanName,
+                                            "url" to subUrl
+                                        ))
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                Log.w("LocalMovieBoxServer", "Failed to fetch external subtitles for ($targetSubId, $targetResId): ${e.message}")
                             }
-                            val subResponseRaw = makeOfficialRequest("GET", "/wefeed-mobile-bff/subject-api/get-ext-captions", subParams)
-                            val subResponseMap = parseJsonToMap(subResponseRaw)
-                            val subData = subResponseMap["data"] as? Map<String, Any?> ?: emptyMap()
-                            val extList = (subData["extCaptions"] ?: subData["list"] ?: emptyList<Any?>()) as? List<Map<String, Any?>> ?: emptyList()
-                            
-                            for (sub in extList) {
-                                val lan = sub["lan"]?.toString() ?: ""
-                                val lanName = sub["lanName"]?.toString() ?: ""
-                                val subUrl = sub["url"]?.toString() ?: ""
-                                if (subUrl.isNotEmpty()) {
-                                    subtitlesMapped.add(mapOf(
-                                        "lan" to lan,
-                                        "lanName" to lanName,
-                                        "url" to subUrl
-                                    ))
+                        }
+
+                        // 1. Fetch external subtitles (get-ext-captions)
+                        val targetResources = mutableListOf<Pair<String, String>>() // Pair(subjectId, resourceId)
+
+                        // (A) Always fetch from the original/main subject (where the full multi-language subtitle pack is located)
+                        var mainDetectors = allDetectors
+                        if (mainSubjectId != subjectId) {
+                            try {
+                                val mainDetailRaw = makeOfficialRequest("GET", "/wefeed-mobile-bff/subject-api/get", mapOf("subjectId" to mainSubjectId))
+                                val mainDetailMap = parseJsonToMap(mainDetailRaw)
+                                val mainDetailData = mainDetailMap["data"] as? Map<String, Any?>
+                                val dList = mainDetailData?.get("resourceDetectors") as? List<Map<String, Any?>> ?: emptyList()
+                                if (dList.isNotEmpty()) {
+                                    mainDetectors = dList
+                                }
+                            } catch (_: Exception) {}
+                        }
+
+                        // Add all detectors of main/original subject
+                        for (d in mainDetectors) {
+                            val rId = d["resourceId"]?.toString()
+                            if (!rId.isNullOrEmpty()) {
+                                targetResources.add(Pair(mainSubjectId, rId))
+                            }
+                        }
+
+                        // (B) Also add all detectors of the current subject (if different from main)
+                        if (mainSubjectId != subjectId) {
+                            for (d in allDetectors) {
+                                val rId = d["resourceId"]?.toString()
+                                if (!rId.isNullOrEmpty()) {
+                                targetResources.add(Pair(subjectId, rId))
                                 }
                             }
-                        } catch (e: Exception) {
-                            Log.w("LocalMovieBoxServer", "Failed to fetch external subtitles: ${e.message}")
+                        }
+
+                        // (C) Also include the English dub subject if available and different
+                        val engDub = allDubs.find { dub ->
+                            val lan = (dub["lanName"] ?: dub["lan"] ?: "").toString().lowercase()
+                            lan.contains("eng")
+                        }
+                        val engSubId = engDub?.get("subjectId")?.toString()
+                        if (!engSubId.isNullOrEmpty() && engSubId != mainSubjectId && engSubId != subjectId) {
+                            try {
+                                val engDetailRaw = makeOfficialRequest("GET", "/wefeed-mobile-bff/subject-api/get", mapOf("subjectId" to engSubId))
+                                val engDetailMap = parseJsonToMap(engDetailRaw)
+                                val engDetailData = engDetailMap["data"] as? Map<String, Any?>
+                                val engDList = engDetailData?.get("resourceDetectors") as? List<Map<String, Any?>> ?: emptyList()
+                                for (d in engDList) {
+                                    val rId = d["resourceId"]?.toString()
+                                    if (!rId.isNullOrEmpty()) {
+                                        targetResources.add(Pair(engSubId, rId))
+                                    }
+                                }
+                            } catch (_: Exception) {}
+                        }
+
+                        // (D) Include the currently active resourceId if provided
+                        if (!finalResourceId.isNullOrEmpty()) {
+                            targetResources.add(Pair(finalSubjectId, finalResourceId))
+                        }
+                        targetResources.add(Pair(finalSubjectId, subResourceId))
+                        targetResources.add(Pair(subjectId, subResourceId))
+
+                        val uniqueTargets = targetResources.distinct()
+                        for (target in uniqueTargets) {
+                            fetchCaptions(target.first, target.second)
                         }
 
                         // 2. Fetch stream-internal subtitles and merge
@@ -1137,13 +1223,22 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
                             }
                         }
 
+                        // Sort subtitles so English and Original appear first in the UI
+                        val sortedSubtitles = subtitlesMapped.sortedWith { a, b ->
+                            val aLan = (a["lanName"] ?: a["lan"] ?: "").toString().lowercase()
+                            val bLan = (b["lanName"] ?: b["lan"] ?: "").toString().lowercase()
+                            val aScore = if (aLan.contains("eng")) 2 else if (aLan.contains("orig")) 1 else 0
+                            val bScore = if (bLan.contains("eng")) 2 else if (bLan.contains("orig")) 1 else 0
+                            bScore.compareTo(aScore)
+                        }
+
                         val responseBody = mapOf(
                             "code" to 0,
                             "url" to workingUrl,
                             "quality" to quality,
                             "cookie" to workingCookie,
                             "resolutions" to (if (prioritizedStreams.isNotEmpty()) prioritizedStreams[0]["resolutions"] ?: "" else ""),
-                            "subtitles" to subtitlesMapped
+                            "subtitles" to sortedSubtitles
                         )
                         Pair(200, toJsonString(responseBody))
                     } catch (e: Exception) {
