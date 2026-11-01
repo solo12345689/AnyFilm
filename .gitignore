@@ -10,3 +10,6 @@ app/build/
 release-key.jks
 *.keystore
 key.properties
+
+# Local configuration
+local.properties

@@ -55,6 +55,14 @@ class PreferencesManager(context: Context) {
         get() = prefs.getString(KEY_SESSION_ID_COOKIE, "") ?: ""
         set(value) = prefs.edit().putString(KEY_SESSION_ID_COOKIE, value).apply()
 
+    var defaultStreamQuality: String
+        get() = prefs.getString("default_stream_quality", "Auto") ?: "Auto"
+        set(value) = prefs.edit().putString("default_stream_quality", value).apply()
+
+    var defaultDownloadQuality: String
+        get() = prefs.getString("default_download_quality", "Highest") ?: "Highest"
+        set(value) = prefs.edit().putString("default_download_quality", value).apply()
+
     fun clearDeveloperBypass() {
         prefs.edit()
             .remove(KEY_SP_CODE)

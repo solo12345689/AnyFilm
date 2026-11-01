@@ -1,7 +1,7 @@
 {
-  "versionName": "4.0",
-  "versionCode": 5,
+  "versionName": "4.1",
+  "versionCode": 6,
   "forceUpdate": true,
-  "changelog": "• App Rebranding: New name & modern brand logo\n• Added Live TV section with Global channels\n• Improved subtitles",
-  "downloadUrl": "https://github.com/solo12345689/AnyFilm/releases/download/v4.0/AnyFilm.apk"
+  "changelog": "• Add more content\n• Add more video quality\n• Update UI",
+  "downloadUrl": "https://github.com/solo12345689/AnyFilm/releases/download/v4.1/AnyFilm.apk"
 }

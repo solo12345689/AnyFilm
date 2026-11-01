@@ -147,10 +147,11 @@ class MovieBoxSignatureInterceptor(private val prefs: PreferencesManager) : Inte
             var requestBodyString = ""
 
             if (fullPath.contains("wefeed-mobile-bff/subject-api/search") || fullPath.endsWith("search")) {
-                val q = originalUrl.queryParameter("q") ?: ""
+                val q = originalUrl.queryParameter("keyword") ?: originalUrl.queryParameter("q") ?: ""
                 val page = originalUrl.queryParameter("page") ?: "1"
                 newUrlBuilder.encodedPath("/search")
                     .setQueryParameter("q", q)
+                    .setQueryParameter("keyword", q)
                     .setQueryParameter("page", page)
                     .removeAllQueryParameters("pageSize")
             } else if (fullPath.contains("wefeed-mobile-bff/subject-api/get") || fullPath.endsWith("get")) {
@@ -384,20 +385,41 @@ fun flattenCategoryJson(jsonStr: String): String {
     val parsed = mapAdapter.fromJson(jsonStr) as? Map<String, Any?> ?: return jsonStr
     
     val data = parsed["data"] as? Map<String, Any?> ?: return jsonStr
-    val list = data["list"] as? List<Map<String, Any?>> ?: return jsonStr
+    val rawSections = (data["sections"] as? List<Map<String, Any?>>)
+    val rawList = (data["list"] as? List<Map<String, Any?>>) 
+        ?: (data["items"] as? List<Map<String, Any?>>) 
+        ?: emptyList()
     
     val allItems = mutableListOf<Map<String, Any?>>()
-    list.forEach { section ->
-        val items = section["items"] as? List<Map<String, Any?>>
-        if (items != null) {
-            allItems.addAll(items)
+    val validSections = mutableListOf<Map<String, Any?>>()
+
+    if (rawSections != null && rawSections.isNotEmpty()) {
+        validSections.addAll(rawSections)
+        rawSections.forEach { section ->
+            val items = section["items"] as? List<Map<String, Any?>>
+            if (items != null) {
+                allItems.addAll(items)
+            }
         }
     }
-    
+
+    if (allItems.isEmpty() && rawList.isNotEmpty()) {
+        rawList.forEach { entry ->
+            val items = entry["items"] as? List<Map<String, Any?>>
+            if (items != null) {
+                allItems.addAll(items)
+                validSections.add(entry)
+            } else {
+                allItems.add(entry)
+            }
+        }
+    }
+
     val responseMap = mapOf(
         "code" to 200,
         "message" to "success",
         "data" to mapOf(
+            "sections" to validSections,
             "list" to allItems,
             "items" to allItems
         )
@@ -433,36 +455,50 @@ fun rewriteStreamJson(jsonStr: String): String {
     val resolutions = parsed["resolutions"] as? String ?: ""
     
     val streamList = mutableListOf<Map<String, Any?>>()
-    if (url.isNotEmpty()) {
-        if (resolutions.isNotEmpty()) {
-            streamList.add(mapOf(
-                "quality" to "Auto",
-                "url" to url,
-                "size" to "Auto",
-                "cookie" to cookie
-            ))
-            resolutions.split(",").forEach { res ->
-                val clean = res.trim()
-                if (clean.isNotEmpty()) {
-                    streamList.add(mapOf(
-                        "quality" to "${clean}p",
-                        "url" to url,
-                        "size" to "Dynamic",
-                        "cookie" to cookie
-                    ))
-                }
-            }
+    val serverStreamList = (parsed["streamList"] ?: parsed["streams"]) as? List<Map<String, Any?>>
+    
+    // If serverStreamList has more than 2 items (Auto + multiple resolutions), use it directly
+    if (!serverStreamList.isNullOrEmpty() && serverStreamList.size > 2) {
+        streamList.addAll(serverStreamList)
+    } else if (url.isNotEmpty()) {
+        val parsedRes = if (resolutions.isNotEmpty()) {
+            resolutions.split(",")
+                .mapNotNull { it.trim().filter { c -> c.isDigit() }.toIntOrNull() }
+                .distinct()
         } else {
+            emptyList()
+        }
+        val allRes = if (parsedRes.isNotEmpty()) {
+            parsedRes.sortedDescending()
+        } else {
+            listOf(1080, 720, 480)
+        }
+        
+        streamList.add(mapOf(
+            "quality" to "Auto",
+            "url" to url,
+            "size" to "Auto",
+            "cookie" to cookie
+        ))
+        for (res in allRes) {
+            val matching = serverStreamList?.find {
+                val qDigits = (it["quality"] as? String)?.filter { c -> c.isDigit() }?.toIntOrNull()
+                qDigits == res
+            }
+            val sUrl = matching?.get("url")?.toString() ?: url
+            val sCookie = matching?.get("cookie")?.toString() ?: cookie
             streamList.add(mapOf(
-                "quality" to "Auto",
-                "url" to url,
-                "size" to "Auto",
-                "cookie" to cookie
+                "quality" to "${res}p",
+                "url" to sUrl,
+                "size" to (matching?.get("size")?.toString() ?: "${res}p HD"),
+                "cookie" to sCookie
             ))
         }
+    } else if (!serverStreamList.isNullOrEmpty()) {
+        streamList.addAll(serverStreamList)
     }
     
-    val subtitles = parsed["subtitles"] as? List<Map<String, Any?>> ?: emptyList()
+    val subtitles = (parsed["subtitles"] ?: parsed["subTitleList"]) as? List<Map<String, Any?>> ?: emptyList()
     val subTitleList = subtitles.map { sub ->
         val lan = sub["lan"] as? String ?: ""
         val lanName = sub["lanName"] as? String ?: ""

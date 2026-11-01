@@ -148,21 +148,50 @@ fun LiveTvScreen(viewModel: com.example.ui.viewmodel.MovieViewModel? = null) {
         try {
             val fetchedChannels = withContext(Dispatchers.IO) {
                 if (selectedCountryCode == "IN_GEO") {
-                    // Jio TV catalog (ClearKey DRM)
+                    // 1. Jio TV catalog (ClearKey DRM) - Filter out old FanCode items
                     val req = Request.Builder().url("https://livetgtv.lovable.app/api/public/channels").build()
                     val resp = liveHttpClient.newCall(req).execute()
                     val body = resp.body?.string() ?: ""
                     val adapter = moshi.adapter(LiveChannelListResponse::class.java)
                     val jioList = adapter.fromJson(body)?.channels ?: emptyList()
-                    jioList.map {
-                        UnifiedChannel(
-                            id = it.id,
-                            name = it.name,
-                            logo = it.logo,
-                            category = it.category?.ifBlank { "Indian TV" } ?: "Indian TV",
-                            isJioTv = true
-                        )
+                    val jioChannels = jioList
+                        .filter { !it.category.equals("fancode", ignoreCase = true) && !it.id.startsWith("fc-") }
+                        .map {
+                            UnifiedChannel(
+                                id = it.id,
+                                name = it.name,
+                                logo = it.logo,
+                                category = it.category?.ifBlank { "Indian TV" } ?: "Indian TV",
+                                isJioTv = true
+                            )
+                        }
+
+                    // 2. Fetch real-time auto-updated FanCode playlist via raw GitHub with cache-buster
+                    val fancodeChannels = try {
+                        val timestamp = System.currentTimeMillis()
+                        val fcUrl = "https://raw.githubusercontent.com/sayanpal514-hue/FANCODE-AUTO-UPDATED-PLAYLIST/main/fancode.m3u?t=$timestamp"
+                        val fcReq = Request.Builder()
+                            .url(fcUrl)
+                            .header("Cache-Control", "no-cache, no-store, must-revalidate")
+                            .header("Pragma", "no-cache")
+                            .build()
+                        val fcResp = liveHttpClient.newCall(fcReq).execute()
+                        if (fcResp.isSuccessful) {
+                            val fcBody = fcResp.body?.string() ?: ""
+                            parseM3uChannels(fcBody).map {
+                                it.copy(
+                                    category = "Fancode",
+                                    isJioTv = false
+                                )
+                            }
+                        } else {
+                            emptyList()
+                        }
+                    } catch (_: Exception) {
+                        emptyList()
                     }
+
+                    jioChannels + fancodeChannels
                 } else {
                     // M3U stream catalog from iptv-org
                     val countryParam = selectedCountryCode.lowercase()

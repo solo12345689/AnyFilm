@@ -92,10 +92,34 @@ class MovieRepository(
         }
     }
 
-    suspend fun getCategoryList(categoryId: Int, page: Int = 1, pageSize: Int = 20): List<MovieSubject> = withContext(Dispatchers.IO) {
+    private val memorySectionsCache = java.util.concurrent.ConcurrentHashMap<Int, List<CategorySection>>()
+
+    suspend fun getCategorySections(categoryId: Int, page: Int = 1, pageSize: Int = 50): List<CategorySection> = withContext(Dispatchers.IO) {
+        val cached = memorySectionsCache[categoryId]
+        try {
+            val response = api.getList(GetListRequest(categoryId, page, pageSize))
+            val sections = response.data?.sections ?: emptyList()
+            if ((response.code == 200 || response.code == 0) && sections.isNotEmpty()) {
+                if (page == 1) {
+                    memorySectionsCache[categoryId] = sections
+                }
+                sections
+            } else {
+                cached ?: emptyList()
+            }
+        } catch (e: Exception) {
+            cached ?: emptyList()
+        }
+    }
+
+    suspend fun getCategoryList(categoryId: Int, page: Int = 1, pageSize: Int = 50): List<MovieSubject> = withContext(Dispatchers.IO) {
         val cached = memoryCategoryCache[categoryId]
         try {
             val response = api.getList(GetListRequest(categoryId, page, pageSize))
+            val sections = response.data?.sections ?: emptyList()
+            if (sections.isNotEmpty() && page == 1) {
+                memorySectionsCache[categoryId] = sections
+            }
             val list = response.data?.let { data ->
                 if (data.list.isNotEmpty()) data.list else data.items
             } ?: emptyList()
@@ -180,10 +204,10 @@ class MovieRepository(
         }
     }
 
-    suspend fun search(query: String): List<MovieSubject> = withContext(Dispatchers.IO) {
+    suspend fun search(query: String, page: Int = 1): List<MovieSubject> = withContext(Dispatchers.IO) {
         if (query.isBlank()) return@withContext emptyList()
         try {
-            val response = api.search(query, 1, 30)
+            val response = api.search(query, page, 30)
             val items = response.data?.let { data ->
                 if (data.items.isNotEmpty()) data.items else data.list
             } ?: emptyList()

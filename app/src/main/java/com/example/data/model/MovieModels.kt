@@ -101,9 +101,17 @@ data class SearchResponse(
 )
 
 @JsonClass(generateAdapter = true)
+data class CategorySection(
+    val title: String = "",
+    val type: String = "SUBJECTS_MOVIE",
+    val items: List<MovieSubject> = emptyList()
+)
+
+@JsonClass(generateAdapter = true)
 data class HomeListData(
     val list: List<MovieSubject> = emptyList(),
-    val items: List<MovieSubject> = emptyList()
+    val items: List<MovieSubject> = emptyList(),
+    val sections: List<CategorySection> = emptyList()
 )
 
 @JsonClass(generateAdapter = true)

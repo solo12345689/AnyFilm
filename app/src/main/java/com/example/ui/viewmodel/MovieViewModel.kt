@@ -10,6 +10,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.data.local.FavoriteEntity
 import com.example.data.local.HistoryEntity
 import com.example.data.local.MovieDatabase
+import com.example.data.model.CategorySection
 import com.example.data.model.Episode
 import com.example.data.model.MovieSubject
 import com.example.data.model.PlayInfo
@@ -65,6 +66,54 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
     var customMcc by mutableStateOf(prefs.spCode.ifEmpty { "40401" })
     var customCountryIso by mutableStateOf(prefs.localIso.ifEmpty { "in" })
     var mockHost by mutableStateOf(prefs.mockHost)
+    var defaultStreamQuality by mutableStateOf(prefs.defaultStreamQuality)
+    var defaultDownloadQuality by mutableStateOf(prefs.defaultDownloadQuality)
+
+    fun setDefaultStreamQualityPref(quality: String) {
+        defaultStreamQuality = quality
+        prefs.defaultStreamQuality = quality
+    }
+
+    fun setDefaultDownloadQualityPref(quality: String) {
+        defaultDownloadQuality = quality
+        prefs.defaultDownloadQuality = quality
+    }
+
+    fun selectStreamByPreference(streamList: List<com.example.data.model.StreamItem>, preference: String): com.example.data.model.StreamItem? {
+        if (streamList.isEmpty()) return null
+        if (preference.equals("Auto", ignoreCase = true)) return streamList.firstOrNull()
+        val prefDigits = preference.filter { it.isDigit() }.toIntOrNull()
+        val exact = streamList.find { 
+            val qDigits = it.quality.filter { c -> c.isDigit() }.toIntOrNull()
+            qDigits == prefDigits
+        }
+        if (exact != null) return exact
+        if (prefDigits != null) {
+            val nonAutoStreams = streamList.filter { it.quality.filter { c -> c.isDigit() }.isNotEmpty() }
+            if (nonAutoStreams.isNotEmpty()) {
+                return nonAutoStreams.minByOrNull { 
+                    val q = it.quality.filter { c -> c.isDigit() }.toIntOrNull() ?: 1080
+                    Math.abs(q - prefDigits)
+                }
+            }
+        }
+        return streamList.firstOrNull()
+    }
+
+    fun selectHighestQualityStream(streamList: List<com.example.data.model.StreamItem>): com.example.data.model.StreamItem? {
+        if (streamList.isEmpty()) return null
+        return streamList.maxByOrNull { stream ->
+            val q = stream.quality.lowercase()
+            when {
+                q.contains("4k") || q.contains("2160") -> 2160
+                q.contains("1080") -> 1080
+                q.contains("720") -> 720
+                q.contains("480") -> 480
+                q.contains("360") -> 360
+                else -> q.filter { it.isDigit() }.toIntOrNull() ?: 0
+            }
+        } ?: streamList.firstOrNull()
+    }
 
     // UI Dashboard State
     var selectedCategoryTab by mutableStateOf(2) // Defaults to Movies (ID 2)
@@ -98,6 +147,11 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
     
     private val categoryCache = mutableMapOf<Int, List<MovieSubject>>()
 
+    private val _categorySections = MutableStateFlow<List<CategorySection>>(emptyList())
+    val categorySections: StateFlow<List<CategorySection>> = _categorySections.asStateFlow()
+
+    private val categorySectionsCache = mutableMapOf<Int, List<CategorySection>>()
+
     private val _searchResults = MutableStateFlow<List<MovieSubject>>(emptyList())
     val searchResults: StateFlow<List<MovieSubject>> = _searchResults.asStateFlow()
 
@@ -128,7 +182,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
 
     // Dynamic Categories
     private val defaultCategories = listOf(
-        2 to "Movies",
+        2 to "Home",
         5 to "Series",
         8 to "Anime",
         18 to "Asian"
@@ -447,7 +501,11 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val list = saved.split(",").mapNotNull { 
                     val parts = it.split(":")
-                    if (parts.size == 2) parts[0].toInt() to parts[1] else null
+                    if (parts.size == 2) {
+                        val id = parts[0].toInt()
+                        val name = if (id == 2) "Home" else parts[1]
+                        id to name
+                    } else null
                 }
                 // Ensure default categories are always present at the start
                 val combined = defaultCategories.toMutableList()
@@ -752,6 +810,15 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 if (response.isSuccessful) {
+                    // Cache the user's chosen avatar locally so it always loads immediately and offline
+                    try {
+                        val app = getApplication<Application>()
+                        val localAvatarFile = java.io.File(app.filesDir, "avatar.jpg")
+                        localAvatarFile.outputStream().use { out ->
+                            out.write(imageBytes)
+                        }
+                    } catch (_: Exception) {}
+
                     // Update user profile on official server with the public avatar URL
                     val modifyRes = api.modifyProfile(mapOf("nickname" to nickname, "avatar" to publicUrl))
                     if (modifyRes.code == 0 || modifyRes.message == "ok") {
@@ -871,8 +938,10 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
 
         // Clear in-memory caches to force fresh fetch for new region
         categoryCache.clear()
+        categorySectionsCache.clear()
         _trendingMovies.value = emptyList()
         _categoryMovies.value = emptyList()
+        _categorySections.value = emptyList()
 
         // Invalidate local proxy cache and guest token for the new region
         viewModelScope.launch(Dispatchers.IO) {
@@ -905,15 +974,34 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 // Fetch trending and categories in parallel using coroutineScope
-                val (trending, categories) = coroutineScope {
+                val (trending, categories, sections) = coroutineScope {
                     val trendingDeferred = async(Dispatchers.IO) { repository.getTrending(1, 20) }
-                    val categoriesDeferred = async(Dispatchers.IO) { repository.getCategoryList(selectedCategoryTab, 1, 30) }
-                    Pair(trendingDeferred.await(), categoriesDeferred.await())
+                    val categoriesDeferred = async(Dispatchers.IO) { repository.getCategoryList(selectedCategoryTab, 1, 50) }
+                    val sectionsDeferred = async(Dispatchers.IO) { repository.getCategorySections(selectedCategoryTab, 1, 50) }
+                    Triple(trendingDeferred.await(), categoriesDeferred.await(), sectionsDeferred.await())
                 }
 
                 _trendingMovies.value = trending
                 categoryCache[selectedCategoryTab] = categories
                 _categoryMovies.value = categories
+                categorySectionsCache[selectedCategoryTab] = sections
+                _categorySections.value = sections
+
+                // Pre-warm poster images for all top items immediately during splash
+                val app = getApplication<Application>()
+                val imgLoader = coil.Coil.imageLoader(app)
+                (trending.take(15) + categories.take(20)).forEach { item ->
+                    if (item.poster.isNotEmpty()) {
+                        val req = coil.request.ImageRequest.Builder(app)
+                            .data(item.poster)
+                            .memoryCacheKey(item.poster)
+                            .diskCacheKey(item.poster)
+                            .size(width = 330, height = 480)
+                            .precision(coil.size.Precision.INEXACT)
+                            .build()
+                        imgLoader.enqueue(req)
+                    }
+                }
 
                 // Prioritize visible poster loading - let Compose handle UI cards directly without network congestion
                 // Background category prefetch is delayed by 3 seconds so visible screen posters load at 100% bandwidth
@@ -942,12 +1030,22 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
         if (cached != null && cached.isNotEmpty()) {
             _categoryMovies.value = cached
         }
+        val cachedSections = categorySectionsCache[categoryId]
+        if (cachedSections != null && cachedSections.isNotEmpty()) {
+            _categorySections.value = cachedSections
+        }
 
         viewModelScope.launch {
             try {
-                val categories = repository.getCategoryList(categoryId, 1, 30)
+                val (categories, sections) = coroutineScope {
+                    val catDeferred = async(Dispatchers.IO) { repository.getCategoryList(categoryId, 1, 50) }
+                    val secDeferred = async(Dispatchers.IO) { repository.getCategorySections(categoryId, 1, 50) }
+                    Pair(catDeferred.await(), secDeferred.await())
+                }
                 categoryCache[categoryId] = categories
                 _categoryMovies.value = categories
+                categorySectionsCache[categoryId] = sections
+                _categorySections.value = sections
                 // Pre-fetch details and warm up posters in the background
                 val app = getApplication<Application>()
                 val imgLoader = coil.Coil.imageLoader(app)
@@ -972,8 +1070,17 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    var searchPage by mutableStateOf(1)
+        private set
+    var isSearchLoadingMore by mutableStateOf(false)
+        private set
+    var canSearchLoadMore by mutableStateOf(true)
+        private set
+
     fun searchMovies(query: String) {
         searchQuery = query
+        searchPage = 1
+        canSearchLoadMore = true
         if (query.isBlank()) {
             _searchResults.value = emptyList()
             loadSearchSuggestions(null)
@@ -982,12 +1089,42 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
         loadSearchSuggestions(query)
         isSearching = true
         viewModelScope.launch {
-            val results = repository.search(query)
+            val results = repository.search(query, 1)
             _searchResults.value = results
             isSearching = false
+            canSearchLoadMore = results.size >= 10
             // Pre-fetch search results in the background
-            results.take(10).forEach { item ->
+            results.take(15).forEach { item ->
                 launch { repository.getDetail(item.id) }
+            }
+        }
+    }
+
+    fun loadMoreSearchResults() {
+        val query = searchQuery
+        if (query.isBlank() || isSearchLoadingMore || !canSearchLoadMore) return
+        isSearchLoadingMore = true
+        viewModelScope.launch {
+            try {
+                val nextPage = searchPage + 1
+                val more = repository.search(query, nextPage)
+                if (more.isNotEmpty()) {
+                    searchPage = nextPage
+                    val current = _searchResults.value.toMutableList()
+                    val existingIds = current.map { it.id }.toSet()
+                    val filtered = more.filter { !existingIds.contains(it.id) }
+                    if (filtered.isNotEmpty()) {
+                        current.addAll(filtered)
+                        _searchResults.value = current
+                    }
+                    canSearchLoadMore = more.size >= 10
+                } else {
+                    canSearchLoadMore = false
+                }
+            } catch (_: Exception) {
+                canSearchLoadMore = false
+            } finally {
+                isSearchLoadingMore = false
             }
         }
     }
@@ -1138,7 +1275,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                     mediaDurationMs = 0L
                 }
 
-                selectedStream = resolvedPlayInfo.streamList.firstOrNull()
+                selectedStream = selectStreamByPreference(resolvedPlayInfo.streamList, defaultStreamQuality)
                 val isDubSelected = selectedResource?.name?.contains("dub", ignoreCase = true) == true
                 selectedSubtitle = if (isDubSelected) null else (resolvedPlayInfo.subTitleList.find { it.language.contains("eng", ignoreCase = true) } ?: resolvedPlayInfo.subTitleList.firstOrNull())
                 isPlaying = true
@@ -1154,6 +1291,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
     fun downloadEpisodesBatch(
         context: android.content.Context,
         episodes: List<com.example.data.model.Episode>,
+        targetQuality: String? = null,
         onProgressUpdate: ((Int, Int) -> Unit)? = null
     ) {
         val subject = selectedSubject ?: return
@@ -1171,7 +1309,9 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                         ep.episodeNumber,
                         resourceId = resId
                     )
-                    val stream = playInfoResult.streamList.firstOrNull()
+                    val stream = (if (targetQuality != null) selectStreamByPreference(playInfoResult.streamList, targetQuality) else null)
+                        ?: selectHighestQualityStream(playInfoResult.streamList)
+                        ?: playInfoResult.streamList.firstOrNull()
                     val streamUrl = stream?.url ?: ""
                     if (streamUrl.isNotEmpty() && !streamUrl.contains("b164fbfb4347792950bdfbfb563d39d9.mp4")) {
                         val safeTitle = "${subject.name} S${ep.seasonNumber}E${ep.episodeNumber.toString().padStart(2, '0')}"
@@ -1211,7 +1351,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                     mediaDurationMs = 0L
                 }
 
-                selectedStream = resolvedPlayInfo.streamList.firstOrNull()
+                selectedStream = selectStreamByPreference(resolvedPlayInfo.streamList, defaultStreamQuality)
                 val isDubSelected = selectedResource?.name?.contains("dub", ignoreCase = true) == true
                 selectedSubtitle = if (isDubSelected) null else (resolvedPlayInfo.subTitleList.find { it.language.contains("eng", ignoreCase = true) } ?: resolvedPlayInfo.subTitleList.firstOrNull())
                 isPlaying = true
@@ -1262,7 +1402,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                     repository.getPlayInfo(activeSubjectId, 0, 0, resourceId = resource.resourceId)
                 }
                 playInfo = resolvedPlayInfo
-                selectedStream = resolvedPlayInfo.streamList.firstOrNull()
+                selectedStream = selectStreamByPreference(resolvedPlayInfo.streamList, defaultStreamQuality)
                 val isDubSelected = selectedResource?.name?.contains("dub", ignoreCase = true) == true
                 selectedSubtitle = if (isDubSelected) null else (resolvedPlayInfo.subTitleList.find { it.language.contains("eng", ignoreCase = true) } ?: resolvedPlayInfo.subTitleList.firstOrNull())
                 isPlaying = true

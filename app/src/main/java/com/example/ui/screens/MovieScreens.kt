@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.ImeAction
@@ -294,8 +295,8 @@ fun SplashScreen(
 
     LaunchedEffect(isReady) {
         val startTime = System.currentTimeMillis()
-        val minDisplayTimeMs = 850L
-        val maxWaitTimeMs = 2000L // Safety timeout: never trap or freeze the user
+        val minDisplayTimeMs = 7000L // Guaranteed minimum 7-8s display
+        val maxWaitTimeMs = 8500L    // Maximum safety timeout (8.5 seconds)
 
         while (isActive) {
             val elapsed = System.currentTimeMillis() - startTime
@@ -304,7 +305,6 @@ fun SplashScreen(
                 break
             }
             if (elapsed >= maxWaitTimeMs) {
-                // Timeout safety exit: proceed to Home screen even if network is slow
                 onFinish()
                 break
             }
@@ -1472,211 +1472,6 @@ fun DashboardShimmerScreen() {
 }
 
 @Composable
-fun HomeScreen(viewModel: MovieViewModel) {
-    val trending by viewModel.trendingMovies.collectAsState()
-    val categoryMovies by viewModel.categoryMovies.collectAsState()
-
-    val context = LocalContext.current
-    if (viewModel.isDashboardLoading) {
-        DashboardShimmerScreen()
-    } else {
-
-    LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(ObsidianDark)
-    ) {
-        // Hero Slider/Banner Section (Auto-cycling Carousel)
-        if (categoryMovies.isNotEmpty()) {
-            item {
-                val bannerMovies = categoryMovies.take(5)
-                val pagerState = androidx.compose.foundation.pager.rememberPagerState(pageCount = { bannerMovies.size })
-                
-                LaunchedEffect(pagerState, bannerMovies) {
-                    while (bannerMovies.isNotEmpty()) {
-                        kotlinx.coroutines.delay(4000)
-                        val nextPage = (pagerState.currentPage + 1) % bannerMovies.size
-                        pagerState.animateScrollToPage(nextPage)
-                    }
-                }
-
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(350.dp)
-                ) {
-                    androidx.compose.foundation.pager.HorizontalPager(
-                        state = pagerState,
-                        modifier = Modifier.fillMaxSize()
-                    ) { page ->
-                        val heroMovie = bannerMovies[page]
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .clickable { viewModel.selectSubject(heroMovie) }
-                        ) {
-                            AsyncImage(
-                                model = coil.request.ImageRequest.Builder(LocalContext.current)
-                                    .data(heroMovie.poster)
-                                    .memoryCacheKey(heroMovie.poster)
-                                    .diskCacheKey(heroMovie.poster)
-                                    .precision(coil.size.Precision.INEXACT)
-                                    .crossfade(false)
-                                    .build(),
-                                contentDescription = heroMovie.name,
-                                contentScale = ContentScale.Crop,
-                                placeholder = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color(0xFF1E1E22)),
-                                error = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color(0xFF1E1E22)),
-                                modifier = Modifier.fillMaxSize()
-                            )
-                            // Gradient shading
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .background(
-                                        Brush.verticalGradient(
-                                            colors = listOf(
-                                                Color.Transparent,
-                                                ObsidianDark
-                                            )
-                                        )
-                                    )
-                            )
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .align(Alignment.BottomStart)
-                                    .padding(20.dp)
-                            ) {
-                                Card(
-                                    colors = CardDefaults.cardColors(containerColor = CinematicRed),
-                                    shape = RoundedCornerShape(4.dp),
-                                    modifier = Modifier.padding(bottom = 8.dp)
-                                ) {
-                                    Text(
-                                        text = "TRENDING",
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color.White,
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                    )
-                                }
-                                Text(
-                                    text = heroMovie.name,
-                                    fontSize = 28.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = TextPrimary,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = heroMovie.genres.joinToString(" • "),
-                                    fontSize = 13.sp,
-                                    color = TextSecondary
-                                )
-                                Spacer(modifier = Modifier.height(12.dp))
-                                Row {
-                                    Button(
-                                        onClick = { viewModel.selectSubject(heroMovie) },
-                                        colors = ButtonDefaults.buttonColors(containerColor = CinematicRed),
-                                        shape = RoundedCornerShape(8.dp)
-                                    ) {
-                                        Icon(Icons.Filled.PlayArrow, contentDescription = "Play")
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text("Details & Play", fontWeight = FontWeight.Bold)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Horizontal list of Trending items (without "Editor's Choice" label)
-        item {
-            Column(modifier = Modifier.padding(top = 16.dp)) {
-                LazyRow(
-                    contentPadding = PaddingValues(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    items(trending) { movie ->
-                        MovieGridItem(movie, showRating = true) {
-                            viewModel.selectSubject(movie)
-                        }
-                    }
-                }
-            }
-        }
-
-        // Horizontal Category filter chips (without "Explore Categories" label)
-        item {
-            Column(modifier = Modifier.padding(top = 16.dp)) {
-                val categories by viewModel.activeCategories.collectAsState()
-
-                LaunchedEffect(categories) {
-                    if (categories.isNotEmpty() && categories.none { it.first == viewModel.selectedCategoryTab }) {
-                        viewModel.loadCategoryList(categories.first().first)
-                    }
-                }
-
-                LazyRow(
-                    contentPadding = PaddingValues(horizontal = 16.dp),
-                    horizontalArrangement = if (categories.size <= 4) Arrangement.SpaceBetween else Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
-                ) {
-                    items(categories) { cat ->
-                        FilterChip(
-                            selected = viewModel.selectedCategoryTab == cat.first,
-                            onClick = { viewModel.loadCategoryList(cat.first) },
-                            label = { Text(cat.second) },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = CinematicRed,
-                                selectedLabelColor = Color.White,
-                                containerColor = ObsidianCard,
-                                labelColor = TextSecondary
-                            ),
-                            border = null
-                        )
-                    }
-                }
-            }
-        }
-
-        // Category Movies Grid list
-        items(categoryMovies.chunked(3)) { rowMovies ->
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                rowMovies.forEach { movie ->
-                    Box(modifier = Modifier.weight(1f)) {
-                        MovieGridItem(movie) {
-                            viewModel.selectSubject(movie)
-                        }
-                    }
-                }
-                // Fill up remaining grid slots
-                if (rowMovies.size < 3) {
-                    repeat(3 - rowMovies.size) {
-                        Spacer(modifier = Modifier.weight(1f))
-                    }
-                }
-            }
-        }
-
-        // Bottom space padding
-        item {
-            Spacer(modifier = Modifier.height(30.dp))
-        }
-    }
-    }
-}
-
-@Composable
 fun MovieGridItem(movie: MovieSubject, showRating: Boolean = false, onClick: () -> Unit) {
     Column(
         modifier = Modifier
@@ -1744,9 +1539,24 @@ fun SearchScreen(viewModel: MovieViewModel) {
     val results by viewModel.searchResults.collectAsState()
     var searchInput by remember { mutableStateOf(viewModel.searchQuery) }
     var isSearchSubmitted by remember { mutableStateOf(false) }
+    val searchListState = rememberLazyListState()
 
     LaunchedEffect(viewModel.customCountryIso) {
         viewModel.loadSearchSuggestions()
+    }
+
+    // Auto-load more results when scrolling near the bottom of search results
+    val shouldLoadMore = remember {
+        derivedStateOf {
+            val totalItems = searchListState.layoutInfo.totalItemsCount
+            val lastVisible = searchListState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            totalItems > 0 && lastVisible >= totalItems - 4
+        }
+    }
+    LaunchedEffect(shouldLoadMore.value) {
+        if (shouldLoadMore.value && viewModel.canSearchLoadMore && !viewModel.isSearchLoadingMore) {
+            viewModel.loadMoreSearchResults()
+        }
     }
 
     BackHandler(enabled = searchInput.isNotEmpty()) {
@@ -1770,7 +1580,17 @@ fun SearchScreen(viewModel: MovieViewModel) {
                 viewModel.searchMovies(it)
             },
             placeholder = { Text("Search", color = TextSecondary) },
-            leadingIcon = { Icon(Icons.Filled.Search, contentDescription = "Search", tint = TextSecondary) },
+            leadingIcon = {
+                IconButton(onClick = {
+                    if (searchInput.isNotBlank()) {
+                        isSearchSubmitted = true
+                        viewModel.searchMovies(searchInput)
+                        focusManager.clearFocus()
+                    }
+                }) {
+                    Icon(Icons.Filled.Search, contentDescription = "Search", tint = if (searchInput.isNotBlank()) CinematicRed else TextSecondary)
+                }
+            },
             trailingIcon = {
                 if (searchInput.isNotEmpty()) {
                     IconButton(onClick = {
@@ -1785,8 +1605,11 @@ fun SearchScreen(viewModel: MovieViewModel) {
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
             keyboardActions = KeyboardActions(
                 onSearch = {
-                    isSearchSubmitted = true
-                    focusManager.clearFocus()
+                    if (searchInput.isNotBlank()) {
+                        isSearchSubmitted = true
+                        viewModel.searchMovies(searchInput)
+                        focusManager.clearFocus()
+                    }
                 }
             ),
             colors = OutlinedTextFieldDefaults.colors(
@@ -1804,7 +1627,7 @@ fun SearchScreen(viewModel: MovieViewModel) {
                 .testTag("search_text_input")
         )
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
         val suggestions by viewModel.searchSuggestions.collectAsState()
 
@@ -1823,7 +1646,7 @@ fun SearchScreen(viewModel: MovieViewModel) {
                         color = TextPrimary,
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(bottom = 12.dp)
+                        modifier = Modifier.padding(bottom = 8.dp)
                     )
                 }
                 
@@ -1880,12 +1703,14 @@ fun SearchScreen(viewModel: MovieViewModel) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Icon(Icons.Filled.SearchOff, contentDescription = "No Results", tint = TextSecondary, modifier = Modifier.size(64.dp))
                     Spacer(modifier = Modifier.height(8.dp))
-                    Text("No results found", color = TextSecondary, fontSize = 15.sp)
+                    Text("No results found for \"$searchInput\"", color = TextSecondary, fontSize = 15.sp)
                 }
             }
         } else {
             LazyColumn(
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                state = searchListState,
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.fillMaxSize()
             ) {
                 items(results) { movie ->
                     Row(
@@ -1902,23 +1727,54 @@ fun SearchScreen(viewModel: MovieViewModel) {
                         AsyncImage(
                             model = movie.poster,
                             contentDescription = movie.name,
-                            contentScale = ContentScale.Crop, placeholder = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color.DarkGray), error = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color.DarkGray),
+                            contentScale = ContentScale.Crop,
+                            placeholder = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color.DarkGray),
+                            error = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color.DarkGray),
                             modifier = Modifier
                                 .size(width = 60.dp, height = 90.dp)
                                 .clip(RoundedCornerShape(6.dp))
                         )
                         Spacer(modifier = Modifier.width(16.dp))
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(movie.name, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
-                            Text(movie.genres.joinToString(", "), fontSize = 13.sp, color = TextSecondary)
+                            Text(movie.name, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = TextPrimary, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            if (movie.genres.isNotEmpty()) {
+                                Text(movie.genres.joinToString(", "), fontSize = 13.sp, color = TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
                             Spacer(modifier = Modifier.height(6.dp))
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Icon(Icons.Filled.Star, contentDescription = "Rating", tint = AccentAmber, modifier = Modifier.size(14.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text(movie.rating ?: "Not available", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                                Text(movie.rating ?: "8.5", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
                                 Spacer(modifier = Modifier.width(12.dp))
-                                Text(movie.year ?: "Not available", fontSize = 12.sp, color = TextSecondary)
+                                Text(movie.year ?: "", fontSize = 12.sp, color = TextSecondary)
+                                if (movie.isTvShow) {
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Box(
+                                        modifier = Modifier
+                                            .background(Color.White.copy(alpha = 0.15f), RoundedCornerShape(3.dp))
+                                            .padding(horizontal = 4.dp, vertical = 1.dp)
+                                    ) {
+                                        Text("TV", fontSize = 10.sp, color = TextSecondary, fontWeight = FontWeight.Bold)
+                                    }
+                                }
                             }
+                        }
+                    }
+                }
+
+                if (viewModel.isSearchLoadingMore) {
+                    item {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(24.dp),
+                                color = CinematicRed,
+                                strokeWidth = 2.dp
+                            )
                         }
                     }
                 }
@@ -2344,351 +2200,6 @@ fun LabScreen(viewModel: MovieViewModel) {
 }
 
 @Composable
-fun DetailScreen(viewModel: MovieViewModel) {
-    val subject = viewModel.selectedSubject ?: return
-    val isFav by viewModel.isFavoriteFlow(subject.id).collectAsState(false)
-
-    BackHandler {
-        viewModel.selectedSubject = null
-    }
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(ObsidianDark)
-    ) {
-        LazyColumn(modifier = Modifier.fillMaxSize()) {
-            // Backdrop and poster cover
-            item {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(300.dp)
-                ) {
-                    AsyncImage(
-                        model = coil.request.ImageRequest.Builder(LocalContext.current)
-                            .data(subject.poster)
-                            .memoryCacheKey(subject.poster)
-                            .diskCacheKey(subject.poster)
-                            .precision(coil.size.Precision.INEXACT)
-                            .crossfade(false)
-                            .build(),
-                        contentDescription = subject.name,
-                        contentScale = ContentScale.Crop,
-                        placeholder = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color(0xFF1E1E22)),
-                        error = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color(0xFF1E1E22)),
-                        modifier = Modifier.fillMaxSize()
-                    )
-                    // Backdrop gradient
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(
-                                Brush.verticalGradient(
-                                    colors = listOf(
-                                        Color.Black.copy(alpha = 0.5f),
-                                        ObsidianDark
-                                    )
-                                )
-                            )
-                    )
-
-                    // Close Button
-                    IconButton(
-                        onClick = { viewModel.selectedSubject = null },
-                        modifier = Modifier
-                            .statusBarsPadding()
-                            .padding(top = 16.dp, start = 16.dp)
-                            .align(Alignment.TopStart)
-                            .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(20.dp))
-                            .testTag("detail_close_button")
-                    ) {
-                        Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
-                    }
-                }
-            }
-
-            // Title block
-            item {
-                Column(modifier = Modifier.padding(horizontal = 20.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = subject.name,
-                            fontSize = 26.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = TextPrimary,
-                            modifier = Modifier.weight(1f)
-                        )
-                        IconButton(onClick = { viewModel.toggleFavorite(subject) }) {
-                            Icon(
-                                imageVector = if (isFav) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
-                                contentDescription = "Favorite",
-                                tint = if (isFav) CinematicRed else TextPrimary,
-                                modifier = Modifier.size(28.dp)
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.Star, contentDescription = "Rating", tint = AccentAmber, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(subject.rating ?: "Not available", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                        }
-                        Text(subject.year ?: "Not available", color = TextSecondary, fontSize = 14.sp)
-                        Text(subject.duration ?: "Not available", color = TextSecondary, fontSize = 14.sp)
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    // Genres row
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        subject.genres.forEach { gen ->
-                            Card(
-                                colors = CardDefaults.cardColors(containerColor = ObsidianCard),
-                                shape = RoundedCornerShape(4.dp)
-                            ) {
-                                Text(
-                                    text = gen,
-                                    fontSize = 11.sp,
-                                    color = TextSecondary,
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                )
-                            }
-                        }
-                    }
-
-                    // Audio Language / Dubs row
-                    val audioDisplay = when {
-                        subject.dubs.isNotEmpty() -> subject.dubs.joinToString(", ")
-                        subject.resourceDetectors.isNotEmpty() -> subject.resourceDetectors.joinToString(", ") { it.name }
-                        else -> "Not available"
-                    }
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(top = 8.dp)
-                    ) {
-                        Icon(Icons.Filled.VolumeUp, contentDescription = "Audio Language", tint = TextSecondary, modifier = Modifier.size(14.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "Audio: $audioDisplay",
-                            fontSize = 12.sp,
-                            color = TextSecondary
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    // Description text
-                    Text(
-                        text = subject.description.ifEmpty { "No description available for this item." },
-                        fontSize = 14.sp,
-                        color = TextSecondary,
-                        lineHeight = 20.sp
-                    )
-
-                    // Live Cast Section
-                    if (subject.cast.isNotEmpty()) {
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            text = "Cast",
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = TextPrimary,
-                            modifier = Modifier.padding(bottom = 8.dp)
-                        )
-                        LazyRow(
-                            horizontalArrangement = Arrangement.spacedBy(16.dp),
-                            modifier = Modifier.padding(bottom = 16.dp)
-                        ) {
-                            items(subject.cast) { actor ->
-                                Column(
-                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                    modifier = Modifier.width(80.dp)
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(60.dp)
-                                            .clip(androidx.compose.foundation.shape.CircleShape)
-                                            .background(ObsidianCard)
-                                    ) {
-                                        if (actor.avatar.isNotEmpty()) {
-                                            coil.compose.AsyncImage(
-                                                model = actor.avatar,
-                                                contentDescription = actor.name,
-                                                contentScale = ContentScale.Crop, placeholder = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color.DarkGray), error = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color.DarkGray),
-                                                modifier = Modifier.fillMaxSize()
-                                            )
-                                        } else {
-                                            Box(
-                                                modifier = Modifier.fillMaxSize(),
-                                                contentAlignment = Alignment.Center
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Filled.Person,
-                                                    contentDescription = "Avatar placeholder",
-                                                    tint = TextSecondary,
-                                                    modifier = Modifier.size(28.dp)
-                                                )
-                                            }
-                                        }
-                                    }
-                                    Spacer(modifier = Modifier.height(6.dp))
-                                    Text(
-                                        text = actor.name,
-                                        fontSize = 11.sp,
-                                        color = TextPrimary,
-                                        maxLines = 1,
-                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                        textAlign = TextAlign.Center,
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-                                    Text(
-                                        text = actor.role.ifEmpty { "Cast" },
-                                        fontSize = 9.sp,
-                                        color = TextSecondary,
-                                        maxLines = 1,
-                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                        textAlign = TextAlign.Center,
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    // More Like This Section
-                    if (viewModel.detailRecommendations.isNotEmpty()) {
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            text = "More Like This",
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = TextPrimary,
-                            modifier = Modifier.padding(bottom = 8.dp)
-                        )
-                        LazyRow(
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            modifier = Modifier.padding(bottom = 16.dp)
-                        ) {
-                            items(viewModel.detailRecommendations) { movie ->
-                                MovieGridItem(movie) {
-                                    viewModel.selectSubject(movie)
-                                }
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(24.dp))
-
-                    // Action buttons
-                    if (!subject.isTvShow) {
-                        Button(
-                            onClick = { viewModel.selectMovieDirect() },
-                            colors = ButtonDefaults.buttonColors(containerColor = CinematicRed),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(50.dp)
-                                .testTag("play_movie_button"),
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Icon(Icons.Filled.PlayArrow, contentDescription = "Play")
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Stream Movie in High Definition", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                        }
-                    } else {
-                        Text(
-                            text = "Seasons",
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = TextPrimary,
-                            modifier = Modifier.padding(bottom = 12.dp)
-                        )
-
-                        // Season Selector Horizontal chips
-                        LazyRow(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.padding(bottom = 20.dp)
-                        ) {
-                            items(viewModel.seasonsList) { s ->
-                                FilterChip(
-                                    selected = viewModel.selectedSeason == s,
-                                    onClick = { viewModel.loadEpisodesForSeason(s) },
-                                    label = { Text("Season $s") },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = CinematicRed,
-                                        selectedLabelColor = Color.White,
-                                        containerColor = ObsidianCard,
-                                        labelColor = TextSecondary
-                                    ),
-                                    border = null
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            // TV Show Episodes List Section
-            if (subject.isTvShow) {
-                items(viewModel.episodesList) { ep ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 20.dp, vertical = 6.dp)
-                            .clickable { viewModel.selectEpisode(ep) }
-                            .background(ObsidianCard, RoundedCornerShape(8.dp))
-                            .padding(10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        AsyncImage(
-                            model = ep.stillPath.ifEmpty { subject.poster },
-                            contentDescription = ep.title,
-                            contentScale = ContentScale.Crop, placeholder = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color.DarkGray), error = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color.DarkGray),
-                            modifier = Modifier
-                                .size(width = 80.dp, height = 50.dp)
-                                .clip(RoundedCornerShape(4.dp))
-                        )
-                        Spacer(modifier = Modifier.width(16.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Episode ${ep.episodeNumber}",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = AccentAmber
-                            )
-                            Text(
-                                text = ep.title,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = TextPrimary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        Icon(Icons.Filled.PlayCircleFilled, contentDescription = "Play", tint = CinematicRed, modifier = Modifier.size(32.dp))
-                    }
-                }
-            }
-
-            // Bottom space
-            item {
-                Spacer(modifier = Modifier.height(40.dp))
-            }
-        }
-    }
-}
-
-@Composable
 fun PlayerScreen(viewModel: MovieViewModel) {
     val playInfo = viewModel.playInfo ?: return
     val subject = viewModel.selectedSubject ?: return
@@ -2989,10 +2500,13 @@ fun PlayerScreen(viewModel: MovieViewModel) {
     LaunchedEffect(selectedStream) {
         val q = selectedStream?.quality ?: "Auto"
         val (maxWidth, maxHeight) = when {
+            q.contains("4k", ignoreCase = true) || q.contains("2160") -> Pair(3840, 2160)
+            q.contains("2k", ignoreCase = true) || q.contains("1440") -> Pair(2560, 1440)
             q.contains("1080") -> Pair(1920, 1080)
             q.contains("720") -> Pair(1280, 720)
             q.contains("480") -> Pair(854, 480)
             q.contains("360") -> Pair(640, 360)
+            q.contains("240") -> Pair(426, 240)
             else -> Pair(Integer.MAX_VALUE, Integer.MAX_VALUE)
         }
         try {
@@ -3308,7 +2822,9 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                                     } else {
                                         subject.name
                                     }
-                                    downloadVideo(context, streamUrl, safeTitle, subject.poster)
+                                    val bestStream = viewModel.playInfo?.streamList?.let { viewModel.selectHighestQualityStream(it) }
+                                    val dlUrl = bestStream?.url?.takeIf { it.isNotEmpty() && !it.contains("b164fbfb4347792950bdfbfb563d39d9.mp4") } ?: streamUrl
+                                    downloadVideo(context, dlUrl, safeTitle, subject.poster)
                                 }) {
                                     Icon(
                                         Icons.Filled.Download,
@@ -3712,7 +3228,12 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                                                                 }
                                                             }
                                                             "quality" -> {
+                                                                val prevPos = exoPlayer.currentPosition
+                                                                if (prevPos > 0) {
+                                                                    viewModel.playbackProgressMs = prevPos
+                                                                }
                                                                 viewModel.selectedStream = item as com.example.data.model.StreamItem
+                                                                android.widget.Toast.makeText(context, "Quality: ${(item as com.example.data.model.StreamItem).quality}", android.widget.Toast.LENGTH_SHORT).show()
                                                             }
                                                             "speed" -> {
                                                                 val speedVal = when (item as String) {
@@ -3804,7 +3325,8 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                                 }
                             }
 
-                            // Download Icon: placed neatly in line right after Season 01 button
+
+                            // Download Icon / Cancel button
                             if (subject.isTvShow && viewModel.episodesList.isNotEmpty()) {
                                 if (isDownloadSelectionMode) {
                                     Button(
@@ -4060,6 +3582,7 @@ fun PlayerScreen(viewModel: MovieViewModel) {
 
         } // Close screen-wrapping Column
 
+
         // Custom Slide-Up 2-Column Grid Bottom Sheet Overlay (Root Level)
         if (activeSheet != null && isFullscreen) {
             Box(
@@ -4299,7 +3822,12 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                                                         }
                                                     }
                                                     "quality" -> {
+                                                        val prevPos = exoPlayer.currentPosition
+                                                        if (prevPos > 0) {
+                                                            viewModel.playbackProgressMs = prevPos
+                                                        }
                                                         viewModel.selectedStream = item as com.example.data.model.StreamItem
+                                                        android.widget.Toast.makeText(context, "Quality: ${(item as com.example.data.model.StreamItem).quality}", android.widget.Toast.LENGTH_SHORT).show()
                                                     }
                                                     "speed" -> {
                                                         val speedVal = when (item as String) {
@@ -5514,973 +5042,6 @@ fun OfflinePlayerScreen(fileToPlay: java.io.File, onDismiss: () -> Unit) {
                         )
                     }
                 }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun SettingsScreen(viewModel: MovieViewModel, onNavigateToHistory: () -> Unit = {}, onNavigateToWatchlist: () -> Unit = {}, onNavigateToManageCategories: () -> Unit = {}) {
-    var email by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    var otp by remember { mutableStateOf("") }
-    var isRegisterMode by remember { mutableStateOf(false) }
-    var errorMessage by remember { mutableStateOf("") }
-    var statusMessage by remember { mutableStateOf("") }
-    var showLoginForm by remember { mutableStateOf(false) }
-
-    val context = LocalContext.current
-    val history by viewModel.historyList.collectAsState()
-    val favorites by viewModel.favoritesList.collectAsState()
-    
-    val groupedHistory = remember(history) {
-        history.groupBy { it.subjectId }.map { it.value.first() }
-    }
-
-    LaunchedEffect(viewModel.isLoggedIn) {
-        if (viewModel.isLoggedIn) {
-            viewModel.checkUserSession()
-            showLoginForm = false
-        }
-    }
-
-    BackHandler(enabled = showLoginForm) {
-        showLoginForm = false
-    }
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(ObsidianDark)
-            .padding(horizontal = 16.dp, vertical = 24.dp)
-    ) {
-        if (viewModel.isLoggedIn || !showLoginForm) {
-            val user = viewModel.currentUserProfile
-            var showEditNicknameDialog by remember { mutableStateOf(false) }
-            var editNickname by remember { mutableStateOf(user?.nickname ?: "") }
-
-            val photoPickerLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
-                contract = androidx.activity.result.contract.ActivityResultContracts.GetContent()
-            ) { uri: android.net.Uri? ->
-                if (uri != null) {
-                    try {
-                        val inputStream = context.contentResolver.openInputStream(uri)
-                        val bytes = inputStream?.readBytes()
-                        if (bytes != null) {
-                            viewModel.uploadAvatarAndModifyProfile(
-                                nickname = user?.nickname ?: "",
-                                imageBytes = bytes,
-                                onSuccess = {
-                                    Toast.makeText(context, "Avatar updated", Toast.LENGTH_SHORT).show()
-                                },
-                                onError = { err ->
-                                    Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
-                                }
-                            )
-                        }
-                    } catch (e: Exception) {
-                        Toast.makeText(context, "Failed to load image: ${e.message}", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
-
-            if (showEditNicknameDialog && viewModel.isLoggedIn) {
-                androidx.compose.material3.AlertDialog(
-                    onDismissRequest = { showEditNicknameDialog = false },
-                    title = { Text("Edit Nickname", color = TextPrimary) },
-                    text = {
-                        androidx.compose.material3.OutlinedTextField(
-                            value = editNickname,
-                            onValueChange = { editNickname = it },
-                            label = { Text("Nickname") },
-                            textStyle = androidx.compose.ui.text.TextStyle(color = TextPrimary),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    },
-                    confirmButton = {
-                        Button(
-                            onClick = {
-                                viewModel.updateProfile(
-                                    nickname = editNickname,
-                                    avatar = user?.avatar ?: "",
-                                    onSuccess = {
-                                        Toast.makeText(context, "Nickname updated", Toast.LENGTH_SHORT).show()
-                                        showEditNicknameDialog = false
-                                    },
-                                    onError = { err ->
-                                        Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
-                                    }
-                                )
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = CinematicRed)
-                        ) {
-                            Text("Save")
-                        }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { showEditNicknameDialog = false }) {
-                            Text("Cancel", color = TextSecondary)
-                        }
-                    },
-                    containerColor = ObsidianCard
-                )
-            }
-
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState()),
-                horizontalAlignment = Alignment.Start,
-                verticalArrangement = Arrangement.Top
-            ) {
-                Spacer(modifier = Modifier.height(4.dp))
-
-                // Profile Header Row (Avatar on Left, Nickname & ID on Right)
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 8.dp)
-                        .clickable {
-                            if (viewModel.isLoggedIn) {
-                                editNickname = user?.nickname ?: ""
-                                showEditNicknameDialog = true
-                            } else {
-                                showLoginForm = true
-                            }
-                        },
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Avatar
-                    if (viewModel.isLoggedIn) {
-                        Box(
-                            modifier = Modifier
-                                .size(50.dp)
-                                .background(ObsidianCard, shape = CircleShape)
-                                .clickable {
-                                    photoPickerLauncher.launch("image/*")
-                                }
-                                .padding(2.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (user?.avatar?.isNotEmpty() == true) {
-                                AsyncImage(
-                                    model = user.avatar,
-                                    contentDescription = "Avatar",
-                                    contentScale = ContentScale.Crop, placeholder = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color.DarkGray), error = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color.DarkGray),
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .clip(CircleShape)
-                                )
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Filled.AccountCircle,
-                                    contentDescription = "User Avatar",
-                                    tint = CinematicRed,
-                                    modifier = Modifier.size(42.dp)
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.width(12.dp))
-                    }
-
-                    // Nickname and ID
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = if (viewModel.isLoggedIn && user?.nickname?.isNotEmpty() == true) user.nickname else "Log in to your account",
-                            fontSize = 17.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = TextPrimary
-                        )
-                        if (viewModel.isLoggedIn) {
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Card(
-                                colors = CardDefaults.cardColors(containerColor = ObsidianCard),
-                                shape = RoundedCornerShape(4.dp)
-                            ) {
-                                Text(
-                                    text = "ID: ${if (user?.userId?.isNotEmpty() == true) user.userId else "00000000"}",
-                                    fontSize = 11.sp,
-                                    color = TextSecondary,
-                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
-                                )
-                            }
-                        }
-                    }
-
-                    if (!viewModel.isLoggedIn) {
-                        Button(
-                            onClick = { showLoginForm = true },
-                            colors = ButtonDefaults.buttonColors(containerColor = CinematicRed),
-                            shape = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
-                            modifier = Modifier.height(34.dp)
-                        ) {
-                            Text("Log In", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                // Watch History Section
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 8.dp),
-                    colors = CardDefaults.cardColors(containerColor = ObsidianCard),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Column(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
-                    ) {
-                        // Title Row
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onNavigateToHistory() }
-                                .padding(horizontal = 14.dp, vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    imageVector = Icons.Filled.History,
-                                    contentDescription = "Watch History",
-                                    tint = TextPrimary,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Column {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text(
-                                            text = "Watch History",
-                                            fontSize = 14.sp,
-                                            color = TextPrimary,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                        if (groupedHistory.isNotEmpty()) {
-                                            Spacer(modifier = Modifier.width(6.dp))
-                                            Box(
-                                                modifier = Modifier
-                                                    .background(Color.White.copy(alpha = 0.15f), RoundedCornerShape(4.dp))
-                                                    .padding(horizontal = 5.dp, vertical = 1.dp)
-                                            ) {
-                                                Text(
-                                                    text = "${groupedHistory.size}",
-                                                    fontSize = 9.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = TextPrimary
-                                                )
-                                            }
-                                        }
-                                    }
-                                    Text(
-                                        text = if (groupedHistory.isNotEmpty()) "${groupedHistory.size} recently watched" else "View your watch history and progress",
-                                        fontSize = 11.sp,
-                                        color = TextSecondary
-                                    )
-                                }
-                            }
-                            Icon(
-                                imageVector = Icons.Filled.ChevronRight,
-                                contentDescription = "Navigate",
-                                tint = TextSecondary,
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
-
-                        // History Posters Row
-                        if (groupedHistory.isNotEmpty()) {
-                            Spacer(modifier = Modifier.height(5.dp))
-                            LazyRow(
-                                modifier = Modifier.fillMaxWidth(),
-                                contentPadding = PaddingValues(horizontal = 14.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                items(groupedHistory.take(5)) { item ->
-                                    Box(
-                                        modifier = Modifier
-                                            .width(90.dp)
-                                            .height(50.dp)
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .background(Color.DarkGray)
-                                            .clickable {
-                                                onNavigateToHistory()
-                                            }
-                                    ) {
-                                        AsyncImage(
-                                            model = item.poster,
-                                            contentDescription = item.name,
-                                            contentScale = ContentScale.Crop, placeholder = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color.DarkGray), error = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color.DarkGray),
-                                            modifier = Modifier.fillMaxSize()
-                                        )
-                                        // Gradient at bottom
-                                        Box(
-                                            modifier = Modifier
-                                                .fillMaxSize()
-                                                .background(
-                                                    Brush.verticalGradient(
-                                                        colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.8f)),
-                                                        startY = 30f
-                                                    )
-                                                )
-                                        )
-                                        // Title text over image
-                                        Text(
-                                            text = item.name,
-                                            color = Color.White,
-                                            fontSize = 9.sp,
-                                            fontWeight = FontWeight.Medium,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier
-                                                .align(Alignment.BottomStart)
-                                                .padding(horizontal = 5.dp, vertical = 3.dp)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // My Watchlist Section
-                Spacer(modifier = Modifier.height(6.dp))
-
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 8.dp),
-                    colors = CardDefaults.cardColors(containerColor = ObsidianCard),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onNavigateToWatchlist() }
-                            .padding(horizontal = 14.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Filled.Bookmark,
-                                contentDescription = "My Watchlist",
-                                tint = CinematicRed,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Column {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        text = "My Watchlist",
-                                        fontSize = 14.sp,
-                                        color = TextPrimary,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                    if (favorites.isNotEmpty()) {
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Box(
-                                            modifier = Modifier
-                                                .background(CinematicRed.copy(alpha = 0.2f), RoundedCornerShape(4.dp))
-                                                .padding(horizontal = 5.dp, vertical = 1.dp)
-                                        ) {
-                                            Text(
-                                                text = "${favorites.size}",
-                                                fontSize = 9.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = CinematicRed
-                                            )
-                                        }
-                                    }
-                                }
-                                Text(
-                                    text = if (favorites.isNotEmpty()) "${favorites.size} saved" else "View your saved movies & series",
-                                    fontSize = 11.sp,
-                                    color = TextSecondary
-                                )
-                            }
-                        }
-                        Icon(
-                            imageVector = Icons.Filled.ChevronRight,
-                            contentDescription = "Navigate",
-                            tint = TextSecondary,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                // Location / Region Selection Section
-                var showLocationDialog by remember { mutableStateOf(false) }
-
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 8.dp),
-                    colors = CardDefaults.cardColors(containerColor = ObsidianCard),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { showLocationDialog = true }
-                            .padding(horizontal = 14.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Filled.LocationOn,
-                                contentDescription = "Location",
-                                tint = TextPrimary,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Column {
-                                Text(
-                                    text = "Location",
-                                    fontSize = 14.sp,
-                                    color = TextPrimary,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = when (viewModel.customCountryIso) {
-                                        "us" -> "United States"
-                                        "br" -> "Brazil"
-                                        "ru" -> "Russia"
-                                        else -> "India"
-                                    },
-                                    fontSize = 11.sp,
-                                    color = TextSecondary
-                                )
-                            }
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                // Manage Categories Section
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 8.dp),
-                    colors = CardDefaults.cardColors(containerColor = ObsidianCard),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onNavigateToManageCategories() }
-                            .padding(horizontal = 14.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Filled.List,
-                                contentDescription = "Manage Categories",
-                                tint = TextPrimary,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Column {
-                                Text(
-                                    text = "Manage Categories",
-                                    fontSize = 14.sp,
-                                    color = TextPrimary,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = "Add or remove Home Feed tabs",
-                                    fontSize = 11.sp,
-                                    color = TextSecondary
-                                )
-                            }
-                        }
-                        Icon(
-                            imageVector = Icons.Filled.ChevronRight,
-                            contentDescription = "Navigate",
-                            tint = TextSecondary,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                // Telegram Community Section
-                var showSettingsTelegramDialog by remember { mutableStateOf(false) }
-                if (showSettingsTelegramDialog) {
-                    TelegramJoinDialog(
-                        onDismiss = { showSettingsTelegramDialog = false },
-                        telegramUrl = "https://t.me/Gengaworldofficial"
-                    )
-                }
-
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 8.dp),
-                    colors = CardDefaults.cardColors(containerColor = ObsidianCard),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { showSettingsTelegramDialog = true }
-                            .padding(horizontal = 14.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Filled.Send,
-                                contentDescription = "Telegram",
-                                tint = Color(0xFF0EA2DE),
-                                modifier = Modifier
-                                    .size(16.dp)
-                                    .rotate(-25f)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Column {
-                                Text(
-                                    text = "Join Telegram Channel",
-                                    fontSize = 14.sp,
-                                    color = TextPrimary,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = "Get early access, requests & updates",
-                                    fontSize = 11.sp,
-                                    color = TextSecondary
-                                )
-                            }
-                        }
-                        Icon(
-                            imageVector = Icons.Filled.ChevronRight,
-                            contentDescription = "Navigate",
-                            tint = TextSecondary,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                // Check for Updates Section
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 8.dp),
-                    colors = CardDefaults.cardColors(containerColor = ObsidianCard),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable(enabled = !viewModel.isCheckingUpdate) {
-                                viewModel.checkForUpdates(isManualCheck = true) { hasUpdate, message ->
-                                    Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
-                                }
-                            }
-                            .padding(horizontal = 14.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Filled.SystemUpdate,
-                                contentDescription = "Check for Updates",
-                                tint = CinematicRed,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Column {
-                                Text(
-                                    text = "Check for Updates",
-                                    fontSize = 14.sp,
-                                    color = TextPrimary,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                val appVersion = remember {
-                                    try {
-                                        context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "2.0"
-                                    } catch (e: Exception) { "2.0" }
-                                }
-                                Text(
-                                    text = if (viewModel.isCheckingUpdate) "Checking latest version..." else "Current: v$appVersion",
-                                    fontSize = 11.sp,
-                                    color = TextSecondary
-                                )
-                            }
-                        }
-                        if (viewModel.isCheckingUpdate) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(18.dp),
-                                color = CinematicRed,
-                                strokeWidth = 2.dp
-                            )
-                        } else {
-                            Icon(
-                                imageVector = Icons.Filled.ChevronRight,
-                                contentDescription = "Check",
-                                tint = TextSecondary,
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
-                    }
-                }
-
-                if (showLocationDialog) {
-                    AlertDialog(
-                        onDismissRequest = { showLocationDialog = false },
-                        title = { Text("Select Region", color = TextPrimary, fontWeight = FontWeight.Bold) },
-                        text = {
-                            Column {
-                                val regions = listOf(
-                                    Triple("90101", "us", "United States"),
-                                    Triple("40401", "in", "India"),
-                                    Triple("72402", "br", "Brazil"),
-                                    Triple("25001", "ru", "Russia")
-                                )
-                                regions.forEach { reg ->
-                                    val isSelected = viewModel.customMcc == reg.first && viewModel.customCountryIso == reg.second
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clickable { 
-                                                viewModel.applyCustomSandbox(reg.first, reg.second)
-                                                showLocationDialog = false
-                                            }
-                                            .padding(vertical = 12.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        RadioButton(
-                                            selected = isSelected,
-                                            onClick = { 
-                                                viewModel.applyCustomSandbox(reg.first, reg.second)
-                                                showLocationDialog = false
-                                            },
-                                            colors = RadioButtonDefaults.colors(selectedColor = CinematicRed)
-                                        )
-                                        Spacer(modifier = Modifier.width(12.dp))
-                                        Text(reg.third, color = TextPrimary, fontSize = 16.sp)
-                                    }
-                                }
-                            }
-                        },
-                        confirmButton = {
-                            TextButton(onClick = { showLocationDialog = false }) {
-                                Text("Close", color = TextSecondary)
-                            }
-                        },
-                        containerColor = ObsidianCard
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(30.dp))
-
-                if (viewModel.isLoggedIn) {
-                    Button(
-                        onClick = {
-                            viewModel.logoutUser {
-                                Toast.makeText(context, "Logged out successfully", Toast.LENGTH_SHORT).show()
-                            }
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth(0.85f)
-                            .align(Alignment.CenterHorizontally)
-                            .height(50.dp)
-                            .testTag("logout_button"),
-                        colors = ButtonDefaults.buttonColors(containerColor = CinematicRed),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Icon(imageVector = Icons.Filled.ExitToApp, contentDescription = "Log Out")
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Sign Out", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                    }
-                }
-                
-                Spacer(modifier = Modifier.height(80.dp))
-            }
-        } else {
-            // Sign In / Register Card Layout
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState()),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                // Close button to return to profile
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
-                    horizontalArrangement = Arrangement.Start
-                ) {
-                    IconButton(onClick = { showLoginForm = false }) {
-                        Icon(Icons.Filled.Close, contentDescription = "Close", tint = TextPrimary)
-                    }
-                }
-
-                // Brand Header
-                Icon(
-                    imageVector = Icons.Filled.Lock,
-                    contentDescription = "MovieBox Auth",
-                    tint = CinematicRed,
-                    modifier = Modifier.size(64.dp)
-                )
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                Text(
-                    text = if (isRegisterMode) "Create Account" else "Welcome Back",
-                    fontSize = 26.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = TextPrimary
-                )
-
-                Text(
-                    text = if (isRegisterMode) "Sign up to sync your history & favorites" else "Sign in to access premium media content",
-                    fontSize = 13.sp,
-                    color = TextSecondary,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(start = 24.dp, end = 24.dp, top = 4.dp)
-                )
-
-                Spacer(modifier = Modifier.height(24.dp))
-
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 8.dp),
-                    colors = CardDefaults.cardColors(containerColor = ObsidianCard),
-                    shape = RoundedCornerShape(16.dp)
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(20.dp),
-                        verticalArrangement = Arrangement.spacedBy(16.dp)
-                    ) {
-                        if (errorMessage.isNotEmpty()) {
-                            Text(
-                                text = errorMessage,
-                                color = CinematicRed,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Medium,
-                                modifier = Modifier.padding(horizontal = 4.dp)
-                            )
-                        }
-
-                        if (statusMessage.isNotEmpty()) {
-                            Text(
-                                text = statusMessage,
-                                color = AccentAmber,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Medium,
-                                modifier = Modifier.padding(horizontal = 4.dp)
-                            )
-                        }
-
-                        // Email Address Input
-                        OutlinedTextField(
-                            value = email,
-                            onValueChange = { email = it },
-                            label = { Text("Email Address") },
-                            leadingIcon = { Icon(Icons.Filled.Email, contentDescription = "Email") },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("email_input"),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = CinematicRed,
-                                unfocusedBorderColor = Color.Gray.copy(alpha = 0.3f),
-                                focusedLabelColor = CinematicRed,
-                                unfocusedLabelColor = TextSecondary,
-                                focusedTextColor = TextPrimary,
-                                unfocusedTextColor = TextPrimary
-                            ),
-                            singleLine = true,
-                            shape = RoundedCornerShape(12.dp)
-                        )
-
-                        // Password Input
-                        OutlinedTextField(
-                            value = password,
-                            onValueChange = { password = it },
-                            label = { Text("Password") },
-                            leadingIcon = { Icon(Icons.Filled.Lock, contentDescription = "Password") },
-                            visualTransformation = PasswordVisualTransformation(),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("password_input"),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = CinematicRed,
-                                unfocusedBorderColor = Color.Gray.copy(alpha = 0.3f),
-                                focusedLabelColor = CinematicRed,
-                                unfocusedLabelColor = TextSecondary,
-                                focusedTextColor = TextPrimary,
-                                unfocusedTextColor = TextPrimary
-                            ),
-                            singleLine = true,
-                            shape = RoundedCornerShape(12.dp)
-                        )
-
-                        // OTP Code Input (only in Register Mode)
-                        if (isRegisterMode) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                OutlinedTextField(
-                                    value = otp,
-                                    onValueChange = { otp = it },
-                                    label = { Text("OTP Code") },
-                                    leadingIcon = { Icon(Icons.Filled.Check, contentDescription = "OTP Code") },
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .testTag("otp_input"),
-                                    colors = OutlinedTextFieldDefaults.colors(
-                                        focusedBorderColor = CinematicRed,
-                                        unfocusedBorderColor = Color.Gray.copy(alpha = 0.3f),
-                                        focusedLabelColor = CinematicRed,
-                                        unfocusedLabelColor = TextSecondary,
-                                        focusedTextColor = TextPrimary,
-                                        unfocusedTextColor = TextPrimary
-                                    ),
-                                    singleLine = true,
-                                    shape = RoundedCornerShape(12.dp)
-                                )
-
-                                Button(
-                                    onClick = {
-                                        if (email.isEmpty()) {
-                                            errorMessage = "Please enter your email to request OTP"
-                                            return@Button
-                                        }
-                                        if (!email.contains("@") || !email.contains(".")) {
-                                            errorMessage = "Please enter a valid email address"
-                                            return@Button
-                                        }
-                                        viewModel.requestOtp(email, isRegister = true, onSuccess = {
-                                            errorMessage = ""
-                                            statusMessage = "OTP sent to your email successfully!"
-                                        }, onError = { err ->
-                                            statusMessage = ""
-                                            errorMessage = err
-                                        })
-                                    },
-                                    modifier = Modifier
-                                        .height(56.dp)
-                                        .testTag("request_otp_button"),
-                                    colors = ButtonDefaults.buttonColors(containerColor = ObsidianDark),
-                                    border = BorderStroke(1.dp, CinematicRed),
-                                    shape = RoundedCornerShape(12.dp),
-                                    enabled = !viewModel.isAuthLoading
-                                ) {
-                                    Text("Get OTP", color = CinematicRed, fontWeight = FontWeight.Bold)
-                                }
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(4.dp))
-
-                        // Submit Button
-                        Button(
-                            onClick = {
-                                if (email.isEmpty() || password.isEmpty()) {
-                                    errorMessage = "Email and Password cannot be empty"
-                                    return@Button
-                                }
-                                if (!email.contains("@") || !email.contains(".")) {
-                                    errorMessage = "Please enter a valid email address"
-                                    return@Button
-                                }
-                                if (isRegisterMode) {
-                                    if (otp.isEmpty()) {
-                                        errorMessage = "Please enter the OTP verification code"
-                                        return@Button
-                                    }
-                                    viewModel.registerAccount(email, password, otp, onSuccess = {
-                                        Toast.makeText(context, "Account created successfully!", Toast.LENGTH_SHORT).show()
-                                    }, onError = { err ->
-                                        errorMessage = err
-                                    })
-                                } else {
-                                    viewModel.loginWithPassword(email, password, onSuccess = {
-                                        Toast.makeText(context, "Signed in successfully!", Toast.LENGTH_SHORT).show()
-                                    }, onError = { err ->
-                                        errorMessage = err
-                                    })
-                                }
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(52.dp)
-                                .testTag("auth_submit_button"),
-                            colors = ButtonDefaults.buttonColors(containerColor = CinematicRed),
-                            shape = RoundedCornerShape(12.dp),
-                            enabled = !viewModel.isAuthLoading
-                        ) {
-                            if (viewModel.isAuthLoading) {
-                                CircularProgressIndicator(color = Color.White, modifier = Modifier.size(24.dp))
-                            } else {
-                                Text(
-                                    text = if (isRegisterMode) "Register & Sign In" else "Sign In",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 16.sp
-                                )
-                            }
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(20.dp))
-
-                // Toggle Sign In vs Register
-                Row(
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = if (isRegisterMode) "Already have an account?" else "Don't have an account?",
-                        color = TextSecondary,
-                        fontSize = 14.sp
-                    )
-                    TextButton(
-                        onClick = {
-                            isRegisterMode = !isRegisterMode
-                            errorMessage = ""
-                            statusMessage = ""
-                        },
-                        modifier = Modifier.testTag("toggle_auth_mode")
-                    ) {
-                        Text(
-                            text = if (isRegisterMode) "Sign In" else "Sign Up",
-                            color = CinematicRed,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp
-                        )
-                    }
-                }
-
-                if (isRegisterMode) {
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text(
-                        text = "Powered by MovieBoxPro",
-                        color = TextSecondary.copy(alpha = 0.5f),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(16.dp))
             }
         }
     }
