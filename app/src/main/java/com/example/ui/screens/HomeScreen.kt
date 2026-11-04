@@ -102,12 +102,25 @@ fun HomeScreen(viewModel: MovieViewModel) {
                                     .fillMaxSize()
                                     .clickable { viewModel.selectSubject(heroMovie) }
                             ) {
+                                val optimalHeroUrl = androidx.compose.runtime.remember(heroMovie.poster) {
+                                    com.example.util.ImageOptimizer.getOptimalUrl(heroMovie.poster, 720)
+                                }
+                                val heroAmbient = androidx.compose.runtime.remember(heroMovie.averageHue) {
+                                    com.example.util.ImageOptimizer.parseAverageHue(heroMovie.averageHue)
+                                }
+                                val heroPlaceholder = androidx.compose.runtime.remember(heroMovie.blurHash, heroAmbient) {
+                                    com.example.util.ImageOptimizer.getBlurHashPainter(heroMovie.blurHash, 30, 20)
+                                        ?: androidx.compose.ui.graphics.painter.ColorPainter(heroAmbient)
+                                }
+
                                 AsyncImage(
                                     model = coil.request.ImageRequest.Builder(LocalContext.current)
-                                        .data(heroMovie.poster)
-                                        .crossfade(true)
+                                        .data(optimalHeroUrl)
+                                        .crossfade(false)
                                         .build(),
                                     contentDescription = heroMovie.name,
+                                    placeholder = heroPlaceholder,
+                                    error = heroPlaceholder,
                                     contentScale = ContentScale.Crop,
                                     modifier = Modifier.fillMaxSize()
                                 )

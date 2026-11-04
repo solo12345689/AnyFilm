@@ -90,6 +90,96 @@ private val moshi = Moshi.Builder()
 private var fallbackKeysCache: List<FallbackChannelKey>? = null
 private var cachedCountries: List<CountryItem>? = null
 
+private data class ZioChannelInfo(
+    val id: String,
+    val name: String,
+    val url: String,
+    val keysMap: Map<String, String>,
+    val token: String?
+)
+
+private var cachedZioChannels: Map<String, ZioChannelInfo>? = null
+private var cachedZioChannelsByName: Map<String, ZioChannelInfo>? = null
+private var zioCacheFetchTime: Long = 0L
+
+private fun fetchZioChannels(): Pair<Map<String, ZioChannelInfo>, Map<String, ZioChannelInfo>> {
+    val now = System.currentTimeMillis()
+    val existingById = cachedZioChannels
+    val existingByName = cachedZioChannelsByName
+    if (existingById != null && existingByName != null && (now - zioCacheFetchTime < 10 * 60 * 1000L)) {
+        return Pair(existingById, existingByName)
+    }
+
+    val byId = mutableMapOf<String, ZioChannelInfo>()
+    val byName = mutableMapOf<String, ZioChannelInfo>()
+
+    try {
+        val req = Request.Builder()
+            .url("https://raw.githubusercontent.com/sportlive18/sportlink-update/main/zio.m3u?t=$now")
+            .header("Cache-Control", "no-cache")
+            .build()
+        val resp = liveHttpClient.newCall(req).execute()
+        if (resp.isSuccessful) {
+            val content = resp.body?.string() ?: ""
+            var currentId = ""
+            var currentName = ""
+            var currentKeys = mutableMapOf<String, String>()
+            var currentToken: String? = null
+
+            for (line in content.lines()) {
+                val trimmed = line.trim()
+                if (trimmed.startsWith("#EXTINF:")) {
+                    currentId = Regex("""tvg-id="([^"]*)"""").find(trimmed)?.groupValues?.getOrNull(1)?.trim() ?: ""
+                    currentName = Regex("""tvg-name="([^"]*)"""").find(trimmed)?.groupValues?.getOrNull(1)?.trim()
+                        ?: trimmed.substringAfterLast(",").trim()
+                    currentKeys = mutableMapOf()
+                    currentToken = null
+                } else if (trimmed.startsWith("#KODIPROP:inputstream.adaptive.license_key=")) {
+                    val keyVal = trimmed.substringAfter("=").trim()
+                    keyVal.split(",").forEach { pair ->
+                        val parts = pair.split(":")
+                        if (parts.size == 2 && parts[0].isNotBlank() && parts[1].isNotBlank()) {
+                            currentKeys[parts[0].trim()] = parts[1].trim()
+                        }
+                    }
+                } else if (trimmed.contains("__hdnea__=")) {
+                    if (currentToken == null) {
+                        currentToken = trimmed.substringAfter("__hdnea__=").substringBefore("\"").substringBefore("&").substringBefore(" ").trim()
+                    }
+                } else if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+                    if (currentId.isNotBlank() || currentName.isNotBlank()) {
+                        val tokenInUrl = if (trimmed.contains("__hdnea__=")) {
+                            trimmed.substringAfter("__hdnea__=").substringBefore("&").trim()
+                        } else currentToken
+
+                        val info = ZioChannelInfo(
+                            id = currentId,
+                            name = currentName,
+                            url = trimmed,
+                            keysMap = currentKeys,
+                            token = tokenInUrl
+                        )
+                        if (currentId.isNotBlank()) byId[currentId] = info
+                        if (currentName.isNotBlank()) {
+                            val normName = currentName.lowercase().replace(Regex("[^a-z0-9]"), "")
+                            byName[normName] = info
+                        }
+                    }
+                    currentId = ""
+                    currentName = ""
+                    currentKeys = mutableMapOf()
+                    currentToken = null
+                }
+            }
+            cachedZioChannels = byId
+            cachedZioChannelsByName = byName
+            zioCacheFetchTime = now
+        }
+    } catch (_: Exception) {}
+
+    return Pair(cachedZioChannels ?: emptyMap(), cachedZioChannelsByName ?: emptyMap())
+}
+
 @OptIn(UnstableApi::class)
 @Composable
 fun LiveTvScreen(viewModel: com.example.ui.viewmodel.MovieViewModel? = null) {
@@ -191,7 +281,36 @@ fun LiveTvScreen(viewModel: com.example.ui.viewmodel.MovieViewModel? = null) {
                         emptyList()
                     }
 
-                    jioChannels + fancodeChannels
+                    // 3. Fetch real-time auto-updated Sony LIV playlist via raw GitHub with cache-buster
+                    val sonyChannels = try {
+                        val timestamp = System.currentTimeMillis()
+                        val sonyUrl = "https://raw.githubusercontent.com/sportlive18/Sonyliv-Playlist-Autoupdate/main/sony.m3u?t=$timestamp"
+                        val sonyReq = Request.Builder()
+                            .url(sonyUrl)
+                            .header("Cache-Control", "no-cache, no-store, must-revalidate")
+                            .header("Pragma", "no-cache")
+                            .build()
+                        val sonyResp = liveHttpClient.newCall(sonyReq).execute()
+                        if (sonyResp.isSuccessful) {
+                            val sonyBody = sonyResp.body?.string() ?: ""
+                            parseM3uChannels(sonyBody).map { ch ->
+                                val mappedLogo = resolveSonyLogoFromJio(ch.name, jioList)
+                                    ?: ch.logo?.takeIf { it.isNotBlank() }
+                                    ?: getSonyChannelLogo(ch.name)
+                                ch.copy(
+                                    category = "Sony",
+                                    logo = mappedLogo,
+                                    isJioTv = false
+                                )
+                            }
+                        } else {
+                            emptyList()
+                        }
+                    } catch (_: Exception) {
+                        emptyList()
+                    }
+
+                    jioChannels + fancodeChannels + sonyChannels
                 } else {
                     // M3U stream catalog from iptv-org
                     val countryParam = selectedCountryCode.lowercase()
@@ -554,6 +673,72 @@ private fun parseM3uChannels(content: String): List<UnifiedChannel> {
         }
     }
     return channels
+}
+
+private fun resolveSonyLogoFromJio(name: String, jioList: List<LiveChannelItem>): String? {
+    val clean = name.lowercase().filter { it.isLetterOrDigit() }
+    
+    // 1. Direct exact clean match from Jio TV channel list
+    for (ch in jioList) {
+        val jClean = ch.name.lowercase().filter { it.isLetterOrDigit() }
+        if (jClean == clean && !ch.logo.isNullOrBlank()) {
+            return ch.logo
+        }
+    }
+
+    // 2. Filter Sony/SET channels in Jio catalog
+    val sonyJio = jioList.filter { 
+        (it.name.contains("Sony", ignoreCase = true) || it.name.contains("SET", ignoreCase = true)) && !it.logo.isNullOrBlank() 
+    }
+
+    // Numbered sports channels ("Ten 1", "Ten 2", "Ten 3", "Ten 4", "Ten 5")
+    for (d in listOf("1", "2", "3", "4", "5")) {
+        if ("ten$d" in clean || "ten $d" in name.lowercase()) {
+            for (ch in sonyJio) {
+                val jn = ch.name.lowercase()
+                if ("ten $d" in jn || "ten$d" in jn || "sports $d" in jn || "sports$d" in jn) {
+                    return ch.logo
+                }
+            }
+        }
+    }
+
+    // Keywords among Sony Jio channels
+    val keywords = listOf("marathi", "pal", "aath", "yay", "max2", "max", "wah", "pix", "sab", "set", "earth", "bbc")
+    for (kw in keywords) {
+        if (kw in clean) {
+            for (ch in sonyJio) {
+                val jClean = ch.name.lowercase().filter { it.isLetterOrDigit() }
+                if (kw in jClean) {
+                    return ch.logo
+                }
+            }
+        }
+    }
+    return null
+}
+
+private fun getSonyChannelLogo(name: String): String {
+    val n = name.lowercase()
+    return when {
+        "set hd" in n -> "https://jiotv.catchup.cdn.jio.com/dare_images/images/Sony_HD.png"
+        "sab" in n -> "https://jiotv.catchup.cdn.jio.com/dare_images/images/SonySAB.png"
+        "marathi" in n -> "https://jiotv.catchup.cdn.jio.com/dare_images/images/SonyMarathi.png"
+        "pal" in n -> "https://jiotv.catchup.cdn.jio.com/dare_images/images/SonyPAL.png"
+        "aath" in n -> "https://jiotv.catchup.cdn.jio.com/dare_images/images/SonyAATH.png"
+        "yay" in n -> "https://jiotv.catchup.cdn.jio.com/dare_images/images/SonyYAYHin.png"
+        "max 2" in n || "max2" in n -> "https://jiotv.catchup.cdn.jio.com/dare_images/images/SonyMAX2.png"
+        "max" in n -> "https://jiotv.catchup.cdn.jio.com/dare_images/images/SonyMAX.png"
+        "wah" in n -> "https://jiotv.catchup.cdn.jio.com/dare_images/images/SonyWAH.png"
+        "pix" in n -> "https://jiotv.catchup.cdn.jio.com/dare_images/images/SonyPIX.png"
+        "ten 1" in n -> "https://jiotvimages.cdn.jio.com/dare_images/images/Ten_HD.png"
+        "ten 2" in n -> "https://jiotvimages.cdn.jio.com/dare_images/images/Ten2_HD.png"
+        "ten 3" in n -> "https://jiotvimages.cdn.jio.com/dare_images/images/Ten3_HD.png"
+        "ten 4" in n -> "https://jiotv.catchup.cdn.jio.com/dare_images/images/SonyLivSports4Kan.png"
+        "ten 5" in n -> "https://jiotv.catchup.cdn.jio.com/dare_images/images/SonyLIV_Sports_5.png"
+        "bbc" in n || "earth" in n -> "https://jiotv.catchup.cdn.jio.com/dare_images/images/SonyBBCEarthEng.png"
+        else -> "https://jiotv.catchup.cdn.jio.com/dare_images/images/Sony_HD.png"
+    }
 }
 
 @Composable
@@ -1045,81 +1230,122 @@ fun UnifiedLiveTvPlayerDialog(
         try {
             resolvedData = withContext(Dispatchers.IO) {
                 if (channel.isJioTv) {
-                    val req = Request.Builder()
-                        .url("https://livetgtv.lovable.app/api/public/channels/${channel.id}")
-                        .build()
-                    val resp = liveHttpClient.newCall(req).execute()
-                    val body = resp.body?.string() ?: throw Exception("Empty channel response")
-                    val adapter = moshi.adapter(LiveChannelDetailsResponse::class.java)
-                    val details = adapter.fromJson(body) ?: throw Exception("Failed to parse channel info")
-
-                    var url = details.sources?.firstOrNull() ?: throw Exception("No stream source available")
-
-                    // Extract token or fetch live cookie if __hdnea__ missing to prevent HTTP 403
-                    var token = if (url.contains("__hdnea__")) {
-                        url.substringAfter("__hdnea__=").substringBefore("&")
-                    } else ""
-
-                    if (token.isBlank()) {
-                        try {
-                            val cReq = Request.Builder().url("https://allinonereborn2.online/jstrweb2/cookies.json").build()
-                            val cResp = liveHttpClient.newCall(cReq).execute()
-                            val cBody = cResp.body?.string() ?: ""
-                            val listType = Types.newParameterizedType(List::class.java, Map::class.java)
-                            val mapAdapter = moshi.adapter<List<Map<String, Any>>>(listType)
-                            val cookieList = mapAdapter.fromJson(cBody)
-                            val fullCookie = cookieList?.firstNotNullOfOrNull { it["cookie"] as? String }
-                            if (!fullCookie.isNullOrBlank()) {
-                                token = fullCookie.substringAfter("__hdnea__=").trim()
-                                val sep = if (url.contains("?")) "&" else "?"
-                                url = "$url${sep}__hdnea__=$token"
-                            }
-                        } catch (_: Exception) {}
-                    }
-
+                    var url: String? = null
                     val keysMap = mutableMapOf<String, String>()
+                    var primaryApiSucceeded = false
+                    var primaryApiError: Exception? = null
 
-                    // 1. Primary API clearKeys map (format: {"keyId": "key"})
-                    details.drm?.clearKeys?.forEach { (kid, k) ->
-                        if (kid.isNotBlank() && k.isNotBlank()) {
-                            keysMap[kid] = k
-                        }
-                    }
-
-                    // 2. Primary API keyId & key fields
-                    if (keysMap.isEmpty()) {
-                        val kId = details.drm?.keyId
-                        val k = details.drm?.key
-                        if (!kId.isNullOrBlank() && !k.isNullOrBlank()) {
-                            keysMap[kId] = k
-                        }
-                    }
-
-                    // 3. Fallback ClearKey database lookup (jstr4web.json)
-                    if (keysMap.isEmpty()) {
-                        if (fallbackKeysCache == null) {
+                    // If attemptCount is 1, try primary Lovable API with 1 retry (total 2 attempts)
+                    if (attemptCount < 2) {
+                        for (apiAttempt in 1..2) {
                             try {
-                                val fReq = Request.Builder().url("https://jjtvxweb.pages.dev/jstr4web.json").build()
-                                val fResp = liveHttpClient.newCall(fReq).execute()
-                                val fBody = fResp.body?.string() ?: ""
-                                val listType = Types.newParameterizedType(List::class.java, FallbackChannelKey::class.java)
-                                val fAdapter = moshi.adapter<List<FallbackChannelKey>>(listType)
-                                fallbackKeysCache = fAdapter.fromJson(fBody)
-                            } catch (_: Exception) {}
-                        }
+                                val req = Request.Builder()
+                                    .url("https://livetgtv.lovable.app/api/public/channels/${channel.id}")
+                                    .build()
+                                val resp = liveHttpClient.newCall(req).execute()
+                                val body = resp.body?.string() ?: throw Exception("Empty channel response")
+                                val adapter = moshi.adapter(LiveChannelDetailsResponse::class.java)
+                                val details = adapter.fromJson(body) ?: throw Exception("Failed to parse channel info")
 
-                        val match = fallbackKeysCache?.find { it.id == channel.id }
-                        if (match != null) {
-                            if (!match.keyId.isNullOrBlank() && !match.key.isNullOrBlank()) {
-                                keysMap[match.keyId] = match.key
-                            }
-                            match.keys?.forEach { pair ->
-                                if (!pair.keyId.isNullOrBlank() && !pair.key.isNullOrBlank()) {
-                                    keysMap[pair.keyId] = pair.key
+                                val sourceUrl = details.sources?.firstOrNull() ?: throw Exception("No stream source available")
+                                url = sourceUrl
+
+                                // Extract token or fetch live cookie if __hdnea__ missing to prevent HTTP 403
+                                var token = if (url.contains("__hdnea__")) {
+                                    url.substringAfter("__hdnea__=").substringBefore("&")
+                                } else ""
+
+                                if (token.isBlank()) {
+                                    try {
+                                        val cReq = Request.Builder().url("https://allinonereborn2.online/jstrweb2/cookies.json").build()
+                                        val cResp = liveHttpClient.newCall(cReq).execute()
+                                        val cBody = cResp.body?.string() ?: ""
+                                        val listType = Types.newParameterizedType(List::class.java, Map::class.java)
+                                        val mapAdapter = moshi.adapter<List<Map<String, Any>>>(listType)
+                                        val cookieList = mapAdapter.fromJson(cBody)
+                                        val fullCookie = cookieList?.firstNotNullOfOrNull { it["cookie"] as? String }
+                                        if (!fullCookie.isNullOrBlank()) {
+                                            token = fullCookie.substringAfter("__hdnea__=").trim()
+                                            val sep = if (url.contains("?")) "&" else "?"
+                                            url = "$url${sep}__hdnea__=$token"
+                                        }
+                                    } catch (_: Exception) {}
+                                }
+
+                                // 1. Primary API clearKeys map (format: {"keyId": "key"})
+                                details.drm?.clearKeys?.forEach { (kid, k) ->
+                                    if (kid.isNotBlank() && k.isNotBlank()) {
+                                        keysMap[kid] = k
+                                    }
+                                }
+
+                                // 2. Primary API keyId & key fields
+                                if (keysMap.isEmpty()) {
+                                    val kId = details.drm?.keyId
+                                    val k = details.drm?.key
+                                    if (!kId.isNullOrBlank() && !k.isNullOrBlank()) {
+                                        keysMap[kId] = k
+                                    }
+                                }
+
+                                // 3. Fallback ClearKey database lookup (jstr4web.json)
+                                if (keysMap.isEmpty()) {
+                                    if (fallbackKeysCache == null) {
+                                        try {
+                                            val fReq = Request.Builder().url("https://jjtvxweb.pages.dev/jstr4web.json").build()
+                                            val fResp = liveHttpClient.newCall(fReq).execute()
+                                            val fBody = fResp.body?.string() ?: ""
+                                            val listType = Types.newParameterizedType(List::class.java, FallbackChannelKey::class.java)
+                                            val fAdapter = moshi.adapter<List<FallbackChannelKey>>(listType)
+                                            fallbackKeysCache = fAdapter.fromJson(fBody)
+                                        } catch (_: Exception) {}
+                                    }
+
+                                    val match = fallbackKeysCache?.find { it.id == channel.id }
+                                    if (match != null) {
+                                        if (!match.keyId.isNullOrBlank() && !match.key.isNullOrBlank()) {
+                                            keysMap[match.keyId] = match.key
+                                        }
+                                        match.keys?.forEach { pair ->
+                                            if (!pair.keyId.isNullOrBlank() && !pair.key.isNullOrBlank()) {
+                                                keysMap[pair.keyId] = pair.key
+                                            }
+                                        }
+                                    }
+                                }
+
+                                primaryApiSucceeded = true
+                                break
+                            } catch (e: Exception) {
+                                primaryApiError = e
+                                if (apiAttempt == 1) {
+                                    kotlinx.coroutines.delay(1200)
                                 }
                             }
                         }
                     }
+
+                    // Fallback: If Lovable API failed after 1 retry, or if attemptCount >= 2 (playback error on Lovable stream)
+                    if (!primaryApiSucceeded || url == null) {
+                        val (zioById, zioByName) = fetchZioChannels()
+                        val normName = channel.name.lowercase().replace(Regex("[^a-z0-9]"), "")
+                        val matchedZio = zioById[channel.id] ?: zioByName[normName]
+
+                        if (matchedZio != null && matchedZio.url.isNotBlank()) {
+                            var zioUrl = matchedZio.url
+                            val token = matchedZio.token ?: ""
+                            if (token.isNotBlank() && !zioUrl.contains("__hdnea__")) {
+                                val sep = if (zioUrl.contains("?")) "&" else "?"
+                                zioUrl = "$zioUrl${sep}__hdnea__=$token"
+                            }
+                            url = zioUrl
+                            keysMap.clear()
+                            keysMap.putAll(matchedZio.keysMap)
+                        } else {
+                            throw primaryApiError ?: Exception("Failed to resolve channel from primary API and backup zio.m3u")
+                        }
+                    }
+
                     Pair(url, keysMap)
                 } else {
                     Pair(channel.streamUrl, emptyMap())
@@ -1156,7 +1382,20 @@ fun UnifiedLiveTvPlayerDialog(
                 resolvedUrl.substringAfter("__hdnea__=").substringBefore("&")
             } else null
 
-            if (!token.isNullOrBlank()) {
+            if (resolvedUrl.contains("slivcdn.com") || channel.category.equals("Sony", ignoreCase = true)) {
+                val defaultHeaders = mutableMapOf(
+                    "Referer" to "https://www.sonyliv.com/",
+                    "Origin" to "https://www.sonyliv.com",
+                    "User-Agent" to "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+                )
+                if (resolvedUrl.contains("hdnea=")) {
+                    val sToken = resolvedUrl.substringAfter("hdnea=").substringBefore("&")
+                    if (sToken.isNotBlank()) {
+                        defaultHeaders["Cookie"] = "hdnea=$sToken"
+                    }
+                }
+                httpDataSourceFactory.setDefaultRequestProperties(defaultHeaders)
+            } else if (!token.isNullOrBlank()) {
                 httpDataSourceFactory.setDefaultRequestProperties(
                     mapOf("Cookie" to "__hdnea__=$token")
                 )

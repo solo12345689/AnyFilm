@@ -97,18 +97,29 @@ fun DetailScreen(viewModel: MovieViewModel) {
                         .fillMaxWidth()
                         .height(300.dp)
                 ) {
+                    val optimalBackdropUrl = androidx.compose.runtime.remember(subject.poster) {
+                        com.example.util.ImageOptimizer.getOptimalUrl(subject.poster, 720)
+                    }
+                    val ambientColor = androidx.compose.runtime.remember(subject.averageHue) {
+                        com.example.util.ImageOptimizer.parseAverageHue(subject.averageHue)
+                    }
+                    val placeholderPainter = androidx.compose.runtime.remember(subject.blurHash, ambientColor) {
+                        com.example.util.ImageOptimizer.getBlurHashPainter(subject.blurHash, 30, 20)
+                            ?: androidx.compose.ui.graphics.painter.ColorPainter(ambientColor)
+                    }
+
                     AsyncImage(
                         model = coil.request.ImageRequest.Builder(LocalContext.current)
-                            .data(subject.poster)
-                            .memoryCacheKey(subject.poster)
-                            .diskCacheKey(subject.poster)
+                            .data(optimalBackdropUrl)
+                            .memoryCacheKey(optimalBackdropUrl)
+                            .diskCacheKey(optimalBackdropUrl)
                             .precision(coil.size.Precision.INEXACT)
                             .crossfade(false)
                             .build(),
                         contentDescription = subject.name,
                         contentScale = ContentScale.Crop,
-                        placeholder = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color(0xFF1E1E22)),
-                        error = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color(0xFF1E1E22)),
+                        placeholder = placeholderPainter,
+                        error = placeholderPainter,
                         modifier = Modifier.fillMaxSize()
                     )
                     // Backdrop gradient

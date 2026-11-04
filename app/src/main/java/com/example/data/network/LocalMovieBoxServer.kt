@@ -1284,7 +1284,8 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
 
                             val role = castMember["character"] ?: castMember["role"] ?: "Cast"
 
-                            val avatar = castMember["avatarUrl"] ?: castMember["avatar"] ?: castMember["photo"] ?: castMember["poster"] ?: ""
+                            val rawAvatar = (castMember["avatarUrl"] ?: castMember["avatar"] ?: castMember["photo"] ?: castMember["poster"] ?: "").toString()
+                            val avatar = com.example.util.ImageOptimizer.getOptimalUrl(rawAvatar, 180)
 
                             mapOf("name" to name, "role" to role, "avatar" to avatar)
 
@@ -1383,7 +1384,7 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
                     val seriesId = path.substringAfter("/episodes/").substringBefore("?").substringBefore("/")
 
                     try {
-                        val rawResponse = makeOfficialRequest("GET", "/wefeed-mobile-bff/subject-api/season-info", mapOf("subjectId" to seriesId))
+                        val rawResponse = makeOfficialRequest("GET", "/wefeed-mobile-bff/subject-api/season-info/v2", mapOf("subjectId" to seriesId))
 
                         val responseMap = parseJsonToMap(rawResponse)
 
@@ -1460,7 +1461,27 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
                             }
 
                             if (eps.isNotEmpty()) {
-                                mappedSeasons.add(mapOf("seasonNumber" to num, "episodes" to eps))
+                                val resEpCounts = mutableMapOf<String, Int>()
+                                val resRaw = (sRaw["resolutions"] as? List<*>)?.mapNotNull { r ->
+                                    if (r is Map<*, *>) {
+                                        val resVal = (r["resolution"] as? Number)?.toInt() ?: r["resolution"]?.toString()?.toIntOrNull()
+                                        val epVal = (r["epNum"] as? Number)?.toInt() ?: r["epNum"]?.toString()?.toIntOrNull() ?: 0
+                                        if (resVal != null) {
+                                            resEpCounts[resVal.toString()] = epVal
+                                            resVal
+                                        } else null
+                                    } else if (r is Number) {
+                                        r.toInt()
+                                    } else {
+                                        r?.toString()?.toIntOrNull()
+                                    }
+                                } ?: emptyList()
+                                mappedSeasons.add(mapOf(
+                                    "seasonNumber" to num,
+                                    "episodes" to eps,
+                                    "resolutions" to resRaw,
+                                    "resolutionEpCounts" to resEpCounts
+                                ))
 
                             }
 
@@ -1540,6 +1561,8 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
 
                         var mainSubjectId: String = subjectId
 
+                        var movieTitle: String = ""
+
                         try {
                             val detailResponseRaw = makeOfficialRequest("GET", "/wefeed-mobile-bff/subject-api/get", mapOf("subjectId" to subjectId))
 
@@ -1547,9 +1570,18 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
 
                             val detailData = detailResponse["data"] as? Map<String, Any?>
 
+                            movieTitle = (detailData?.get("title") ?: detailData?.get("name") ?: detailData?.get("subjectName") ?: detailData?.get("title_en") ?: "").toString()
+
                             val type = detailData?.get("subjectType") ?: detailData?.get("type") ?: 1
 
-                            isMovie = type.toString().toDoubleOrNull()?.toInt() == 1
+                            val typeNum = type.toString().toDoubleOrNull()?.toInt() ?: 1
+
+                            val hasTvIndicators = (detailData?.get("seNum") != null && (detailData?.get("seNum").toString().toIntOrNull() ?: 0) > 0) ||
+                                detailData?.get("episodeCount") != null ||
+                                detailData?.get("seasonCount") != null ||
+                                (detailData?.get("seasons") as? List<*>)?.isNotEmpty() == true
+
+                            isMovie = (typeNum == 1) && !hasTvIndicators
 
                             val detectors = detailData?.get("resourceDetectors") as? List<Map<String, Any?>> ?: emptyList()
 
@@ -1611,7 +1643,7 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
 
                         if (finalResourceId != null) params["resourceId"] = finalResourceId
 
-                        val rawResponse = makeOfficialRequest("GET", "/wefeed-mobile-bff/subject-api/play-info", params)
+                        val rawResponse = makeOfficialRequest("GET", "/wefeed-mobile-bff/subject-api/play-info/v2", params)
 
                         val responseMap = parseJsonToMap(rawResponse)
 
@@ -1641,155 +1673,256 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
 
                         if (allDummy) {
                             try {
-                                val ugcFirstRaw = makeOfficialRequest("GET", "/wefeed-mobile-bff/ugc/video/first-by-subject", mapOf("subjectId" to finalSubjectId))
-
-                                val ugcFirstMap = parseJsonToMap(ugcFirstRaw)
-
-                                val ugcFirstData = ugcFirstMap["data"] as? Map<String, Any?>
-
-                                val ugcVidId = ugcFirstData?.get("ugcVideoId")?.toString()
-
-                                val belongToCollection = ugcFirstData?.get("belongToCollection") as? Map<String, Any?>
-
-                                val collectionId = belongToCollection?.get("collectionId")?.toString()
+                                val targetEpNum = resEp?.toIntOrNull() ?: 1
+                                val targetSeNum = resSe?.toIntOrNull() ?: 1
 
                                 val ugcStreams = mutableListOf<Map<String, Any?>>()
-
                                 var foundTargetInCollection = false
 
-                                // Step 1: Try Collection Download (for TV/Anime)
-
-                                if (!collectionId.isNullOrEmpty()) {
-                                    val ugcDlRaw = makeOfficialRequest("GET", "/wefeed-mobile-bff/ugc/collection/download-list", mapOf("collectionId" to collectionId, "page" to "1", "perPage" to "50"))
-
-                                    val ugcDlMap = parseJsonToMap(ugcDlRaw)
-
-                                    val ugcDlData = ugcDlMap["data"] as? Map<String, Any?>
-
-                                    val ugcItems = ugcDlData?.get("items") as? List<Map<String, Any?>> ?: emptyList()
-
-                                    // Look for the specific episode (e.g., S1EP13 or E13)
-
-                                    val targetEpStr = "S${resSe ?: 1}EP${resEp ?: 1}"
-
-                                    val targetEpAlt = "E${resEp ?: 1}"
-
-                                    var targetItem: Map<String, Any?>? = null
-
-                                    for (item in ugcItems) {
-                                        val epTitle = item["epTitle"]?.toString()?.uppercase() ?: ""
-
-                                        val title = item["title"]?.toString()?.uppercase() ?: ""
-
-                                        if (epTitle.contains(targetEpStr) || epTitle.contains(targetEpAlt) || title.contains(targetEpStr) || title.contains(targetEpAlt)) {
-                                            targetItem = item
-
-                                            break
-
-                                        }
-
-                                    }
-
-                                    // If we couldn't match by title, but we have the video for ep 1 and they requested ep 1
-
-                                    if (targetItem == null && resEp == "1" && ugcItems.isNotEmpty()) {
-                                        targetItem = ugcItems[0]
-
-                                    }
-
-                                    if (targetItem != null) {
-                                        foundTargetInCollection = true
-
-                                        val resources = targetItem["resources"] as? List<Map<String, Any?>> ?: emptyList()
-
-                                        for (res in resources) {
-                                            val rUrl = res["url"]?.toString() ?: ""
-
-                                            if (rUrl.isNotEmpty() && !rUrl.contains("macdn.aoneroom.com") && !rUrl.contains("b164fbfb43")) {
-                                                val mutableRes = res.toMutableMap()
-                                                val uLower = rUrl.lowercase()
-                                                if (mutableRes["resolution"] == null && mutableRes["quality"] == null) {
-                                                    if (uLower.contains("1080") || uLower.contains("nyaa")) {
-                                                        mutableRes["resolution"] = 1080
-                                                        mutableRes["quality"] = "1080p"
-                                                    } else if (uLower.contains("720")) {
-                                                        mutableRes["resolution"] = 720
-                                                        mutableRes["quality"] = "720p"
-                                                    } else if (uLower.contains("480")) {
-                                                        mutableRes["resolution"] = 480
-                                                        mutableRes["quality"] = "480p"
-                                                    } else if (uLower.contains("h265") || uLower.contains("resource")) {
-                                                        mutableRes["resolution"] = 720
-                                                        mutableRes["quality"] = "720p"
-                                                    }
-                                                }
-                                                ugcStreams.add(mutableRes)
-
-                                            }
-
-                                        }
-
-                                    }
-
+                                // Candidate subject IDs: First try finalSubjectId, then try mainSubjectId (Original Anime) if different
+                                val candidateSubjectIds = mutableListOf(finalSubjectId)
+                                if (mainSubjectId != finalSubjectId && !candidateSubjectIds.contains(mainSubjectId)) {
+                                    candidateSubjectIds.add(mainSubjectId)
                                 }
 
-                                // Step 2: Fallback to single video download (for Movies or if collection failed)
+                                val epExactRegex = Regex("""(?i)(?:s0*${targetSeNum}\s*)?(?:ep|episode|e|#|\s|^)0*${targetEpNum}(?:[^\d]|$)""")
 
-                                if (!foundTargetInCollection && !ugcVidId.isNullOrEmpty()) {
-                                    val ugcDlRaw = makeOfficialRequest("GET", "/wefeed-mobile-bff/ugc/video/download", mapOf("ugcVideoId" to ugcVidId))
+                                for (candSubId in candidateSubjectIds) {
+                                    if (foundTargetInCollection) break
 
-                                    val ugcDlMap = parseJsonToMap(ugcDlRaw)
+                                    val ugcFirstRaw = makeOfficialRequest("GET", "/wefeed-mobile-bff/ugc/video/first-by-subject", mapOf("subjectId" to candSubId))
+                                    val ugcFirstMap = parseJsonToMap(ugcFirstRaw)
+                                    val ugcFirstData = ugcFirstMap["data"] as? Map<String, Any?>
+                                    val ugcVidId = ugcFirstData?.get("ugcVideoId")?.toString()
+                                    val belongToCollection = ugcFirstData?.get("belongToCollection") as? Map<String, Any?>
+                                    val collectionId = belongToCollection?.get("collectionId")?.toString()
+                                    val totalVideos = (belongToCollection?.get("videoNum") ?: 0).toString().toIntOrNull() ?: 0
+                                    val totalPages = maxOf(1, ((totalVideos - 1) / 50) + 1)
 
-                                    val ugcDlData = ugcDlMap["data"] as? Map<String, Any?>
-
-                                    val ugcItems = ugcDlData?.get("items") as? List<Map<String, Any?>> ?: emptyList()
-
-                                    for (item in ugcItems) {
-                                        val resources = item["resources"] as? List<Map<String, Any?>> ?: emptyList()
-
-                                        for (res in resources) {
-                                            val rUrl = res["url"]?.toString() ?: ""
-
-                                            if (rUrl.isNotEmpty() && !rUrl.contains("macdn.aoneroom.com") && !rUrl.contains("b164fbfb43")) {
-                                                val mutableRes = res.toMutableMap()
-                                                val uLower = rUrl.lowercase()
-                                                if (mutableRes["resolution"] == null && mutableRes["quality"] == null) {
-                                                    if (uLower.contains("1080") || uLower.contains("nyaa")) {
-                                                        mutableRes["resolution"] = 1080
-                                                        mutableRes["quality"] = "1080p"
-                                                    } else if (uLower.contains("720")) {
-                                                        mutableRes["resolution"] = 720
-                                                        mutableRes["quality"] = "720p"
-                                                    } else if (uLower.contains("480")) {
-                                                        mutableRes["resolution"] = 480
-                                                        mutableRes["quality"] = "480p"
-                                                    } else if (uLower.contains("h265") || uLower.contains("resource")) {
-                                                        mutableRes["resolution"] = 720
-                                                        mutableRes["quality"] = "720p"
-                                                    }
-                                                }
-                                                ugcStreams.add(mutableRes)
-
+                                    if (!collectionId.isNullOrEmpty()) {
+                                        val primaryPage = maxOf(1, minOf(totalPages, ((targetEpNum - 1) / 50) + 1))
+                                        val pagesToTry = mutableListOf(primaryPage)
+                                        for (p in listOf(primaryPage - 1, primaryPage + 1, primaryPage - 2, primaryPage + 2, primaryPage - 3, primaryPage + 3, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)) {
+                                            if (p in 1..totalPages && !pagesToTry.contains(p)) {
+                                                pagesToTry.add(p)
                                             }
-
                                         }
 
+                                        var targetItem: Map<String, Any?>? = null
+
+                                        for (p in pagesToTry) {
+                                            val ugcDlRaw = makeOfficialRequest(
+                                                "GET",
+                                                "/wefeed-mobile-bff/ugc/collection/download-list",
+                                                mapOf("collectionId" to collectionId, "page" to p.toString(), "perPage" to "50")
+                                            )
+                                            val ugcDlMap = parseJsonToMap(ugcDlRaw)
+                                            val ugcDlData = ugcDlMap["data"] as? Map<String, Any?>
+                                            val ugcItems = ugcDlData?.get("items") as? List<Map<String, Any?>> ?: emptyList()
+                                            if (ugcItems.isEmpty() && p > primaryPage) {
+                                                break
+                                            }
+
+                                            for (item in ugcItems) {
+                                                val itemEp = item["episode"] ?: item["ep"] ?: item["episodeNumber"] ?: item["order"] ?: item["seq"]
+                                                if (itemEp != null && itemEp.toString().toIntOrNull() == targetEpNum) {
+                                                    targetItem = item
+                                                    break
+                                                }
+
+                                                val epTitle = item["epTitle"]?.toString() ?: ""
+                                                val title = item["title"]?.toString() ?: ""
+
+                                                if (epExactRegex.containsMatchIn(epTitle) || epExactRegex.containsMatchIn(title)) {
+                                                    targetItem = item
+                                                    break
+                                                }
+                                            }
+
+                                            if (targetItem == null && targetEpNum == 1 && p == 1 && ugcItems.isNotEmpty()) {
+                                                targetItem = ugcItems[0]
+                                            }
+
+                                            if (targetItem != null) {
+                                                break
+                                            }
+                                        }
+
+                                        if (targetItem != null) {
+                                            foundTargetInCollection = true
+                                            val resources = targetItem["resources"] as? List<Map<String, Any?>> ?: emptyList()
+                                            for (res in resources) {
+                                                val rUrl = res["url"]?.toString() ?: ""
+                                                if (rUrl.isNotEmpty() && !rUrl.contains("macdn.aoneroom.com") && !rUrl.contains("b164fbfb43")) {
+                                                    val mutableRes = res.toMutableMap()
+                                                    val uLower = rUrl.lowercase()
+                                                    val rawResVal = res["resolutions"] ?: res["resolution"] ?: res["quality"] ?: res["definition"]
+                                                    val parsedResNum = rawResVal?.toString()?.filter { it.isDigit() }?.toIntOrNull()
+                                                    if (parsedResNum != null && parsedResNum > 0) {
+                                                        mutableRes["resolution"] = parsedResNum
+                                                        mutableRes["quality"] = "${parsedResNum}p"
+                                                    } else {
+                                                        if (uLower.contains("1080") || uLower.contains("nyaa")) {
+                                                            mutableRes["resolution"] = 1080
+                                                            mutableRes["quality"] = "1080p"
+                                                        } else if (uLower.contains("720")) {
+                                                            mutableRes["resolution"] = 720
+                                                            mutableRes["quality"] = "720p"
+                                                        } else if (uLower.contains("480")) {
+                                                            mutableRes["resolution"] = 480
+                                                            mutableRes["quality"] = "480p"
+                                                        } else {
+                                                            mutableRes["resolution"] = 720
+                                                            mutableRes["quality"] = "720p"
+                                                        }
+                                                    }
+                                                    ugcStreams.add(mutableRes)
+                                                }
+                                            }
+                                        }
                                     }
 
+                                    // Single video fallback: ONLY for Movies or Ep 1 if collection didn't yield anything
+                                    if (!foundTargetInCollection && !ugcVidId.isNullOrEmpty() && (isMovie || targetEpNum == 1)) {
+                                        val ugcDlRaw = makeOfficialRequest("GET", "/wefeed-mobile-bff/ugc/video/download", mapOf("ugcVideoId" to ugcVidId))
+                                        val ugcDlMap = parseJsonToMap(ugcDlRaw)
+                                        val ugcDlData = ugcDlMap["data"] as? Map<String, Any?>
+                                        val ugcItems = ugcDlData?.get("items") as? List<Map<String, Any?>> ?: emptyList()
+                                        for (item in ugcItems) {
+                                            val resources = item["resources"] as? List<Map<String, Any?>> ?: emptyList()
+                                            for (res in resources) {
+                                                val rUrl = res["url"]?.toString() ?: ""
+                                                if (rUrl.isNotEmpty() && !rUrl.contains("macdn.aoneroom.com") && !rUrl.contains("b164fbfb43")) {
+                                                    val mutableRes = res.toMutableMap()
+                                                    val uLower = rUrl.lowercase()
+                                                    val rawResVal = res["resolutions"] ?: res["resolution"] ?: res["quality"] ?: res["definition"]
+                                                    val parsedResNum = rawResVal?.toString()?.filter { it.isDigit() }?.toIntOrNull()
+                                                    if (parsedResNum != null && parsedResNum > 0) {
+                                                        mutableRes["resolution"] = parsedResNum
+                                                        mutableRes["quality"] = "${parsedResNum}p"
+                                                    } else {
+                                                        if (uLower.contains("1080") || uLower.contains("nyaa")) {
+                                                            mutableRes["resolution"] = 1080
+                                                            mutableRes["quality"] = "1080p"
+                                                        } else if (uLower.contains("720")) {
+                                                            mutableRes["resolution"] = 720
+                                                            mutableRes["quality"] = "720p"
+                                                        } else if (uLower.contains("480")) {
+                                                            mutableRes["resolution"] = 480
+                                                            mutableRes["quality"] = "480p"
+                                                        } else {
+                                                            mutableRes["resolution"] = 720
+                                                            mutableRes["quality"] = "720p"
+                                                        }
+                                                    }
+                                                    ugcStreams.add(mutableRes)
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Engine 2: Cloud Sniffer Engine (/sniff/config) via /subject-api/resource
+                                    try {
+                                        val page = maxOf(0, (targetEpNum - 1) / 20)
+                                        val pagesToSniff = mutableListOf(page)
+                                        for (p in listOf(page - 1, page + 1, page + 2)) {
+                                            if (p >= 0 && !pagesToSniff.contains(p)) {
+                                                pagesToSniff.add(p)
+                                            }
+                                        }
+
+                                        for (p in pagesToSniff) {
+                                            val resRaw = makeOfficialRequest(
+                                                "GET",
+                                                "/wefeed-mobile-bff/subject-api/resource",
+                                                mapOf("subjectId" to candSubId, "page" to p.toString(), "perPage" to "20", "pagerMode" to "0")
+                                            )
+                                            val resMap = parseJsonToMap(resRaw)
+                                            val resData = resMap["data"] as? Map<String, Any?>
+                                            val resItems = (resData?.get("list") ?: resData?.get("items")) as? List<Map<String, Any?>> ?: emptyList()
+                                            if (resItems.isEmpty() && p > page) break
+
+                                            for (it in resItems) {
+                                                val itEp = it["ep"] ?: it["episode"]
+                                                if (itEp != null && itEp.toString().toIntOrNull() == targetEpNum) {
+                                                    val sourceUrl = (it["sourceUrl"] ?: it["resourceLink"])?.toString() ?: ""
+                                                    if (sourceUrl.isNotEmpty() && !sourceUrl.contains("macdn.aoneroom.com") && !sourceUrl.contains("b164fbfb43")) {
+                                                        val sniffRaw = makeOfficialRequest(
+                                                            "GET",
+                                                            "/wefeed-mobile-bff/sniff/config",
+                                                            mapOf("linkUrl" to sourceUrl, "subjectId" to candSubId)
+                                                        )
+                                                        val sniffMap = parseJsonToMap(sniffRaw)
+                                                        val sniffData = sniffMap["data"] as? Map<String, Any?>
+                                                        val dlUrl = sniffData?.get("downloadUrl")?.toString() ?: ""
+                                                        if (dlUrl.isNotEmpty() && !dlUrl.contains("macdn.aoneroom.com") && !dlUrl.contains("b164fbfb43") && !ugcStreams.any { it["url"] == dlUrl }) {
+                                                            val snRes = (it["resolution"] ?: it["resolutions"] ?: 720).toString().filter { c -> c.isDigit() }.toIntOrNull() ?: 720
+                                                            val snCodec = it["codecName"]?.toString() ?: "hevc"
+                                                            val snSize = it["size"]?.toString() ?: "${snRes}p HD"
+                                                            ugcStreams.add(mutableMapOf(
+                                                                "url" to dlUrl,
+                                                                "resolution" to snRes,
+                                                                "quality" to "${snRes}p",
+                                                                "codecName" to snCodec,
+                                                                "size" to snSize,
+                                                                "id" to (it["resourceId"]?.toString() ?: System.currentTimeMillis().toString()),
+                                                                "format" to "MP4"
+                                                            ))
+                                                            Log.i("LocalMovieBoxServer", "SNIFFER SUCCESS: Recovered stream for ep $targetEpNum (${snRes}p): $dlUrl")
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.w("LocalMovieBoxServer", "Sniffer episode resolution failed: ${e.message}")
+                                    }
+
+                                    // Engine 3: Movie detector sniffer
+                                    if (isMovie) {
+                                        for (d in allDetectors) {
+                                            val directDl = d["downloadUrl"]?.toString() ?: ""
+                                            val rLink = (d["resourceLink"] ?: d["sourceUrl"])?.toString() ?: ""
+                                            if (directDl.isNotEmpty() && !directDl.contains("macdn.aoneroom.com") && !directDl.contains("b164fbfb43") && !ugcStreams.any { it["url"] == directDl }) {
+                                                val mutableD = d.toMutableMap()
+                                                mutableD["url"] = directDl
+                                                val dRes = (d["resolutions"] ?: d["resolution"] ?: 1080).toString().filter { c -> c.isDigit() }.toIntOrNull() ?: 1080
+                                                mutableD["resolution"] = dRes
+                                                mutableD["quality"] = "${dRes}p"
+                                                ugcStreams.add(mutableD)
+                                            } else if (rLink.isNotEmpty() && !rLink.contains("macdn.aoneroom.com") && !rLink.contains("b164fbfb43")) {
+                                                try {
+                                                    val sniffRaw = makeOfficialRequest(
+                                                        "GET",
+                                                        "/wefeed-mobile-bff/sniff/config",
+                                                        mapOf("linkUrl" to rLink, "subjectId" to candSubId)
+                                                    )
+                                                    val sniffMap = parseJsonToMap(sniffRaw)
+                                                    val sniffData = sniffMap["data"] as? Map<String, Any?>
+                                                    val dlUrl = sniffData?.get("downloadUrl")?.toString() ?: ""
+                                                    if (dlUrl.isNotEmpty() && !dlUrl.contains("macdn.aoneroom.com") && !dlUrl.contains("b164fbfb43") && !ugcStreams.any { it["url"] == dlUrl }) {
+                                                        val mutableD = d.toMutableMap()
+                                                        mutableD["url"] = dlUrl
+                                                        val dRes = (d["resolutions"] ?: d["resolution"] ?: 1080).toString().filter { c -> c.isDigit() }.toIntOrNull() ?: 1080
+                                                        mutableD["resolution"] = dRes
+                                                        mutableD["quality"] = "${dRes}p"
+                                                        ugcStreams.add(mutableD)
+                                                        Log.i("LocalMovieBoxServer", "SNIFFER MOVIE SUCCESS: $dlUrl")
+                                                    }
+                                                } catch (_: Exception) {}
+                                            }
+                                        }
+                                    }
                                 }
 
                                 if (ugcStreams.isNotEmpty()) {
                                     streams = ugcStreams
-
-                                    Log.i("LocalMovieBoxServer", "UGC BYPASS SUCCESS: Recovered ${ugcStreams.size} REAL streams!")
-
+                                    Log.i("LocalMovieBoxServer", "UGC BYPASS SUCCESS: Recovered ${ugcStreams.size} REAL streams for episode $targetEpNum!")
                                 }
 
                             } catch (e: Exception) {
                                 Log.w("LocalMovieBoxServer", "UGC bypass failed: ${e.message}")
-
                             }
-
                         }
 
                         val prioritizedStreams = streams.map { it }
@@ -1822,7 +1955,17 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
 
                             }
 
-                            val bestStream = sortedDescending[0]
+                            val bestStream = prioritizedStreams.maxWithOrNull { s1, s2 ->
+                                val r1 = (s1["resolutions"] ?: s1["resolution"] ?: s1["quality"] ?: "").toString().filter { it.isDigit() }.toIntOrNull() ?: 0
+                                val r2 = (s2["resolutions"] ?: s2["resolution"] ?: s2["quality"] ?: "").toString().filter { it.isDigit() }.toIntOrNull() ?: 0
+                                if (r1 != r2) {
+                                    r1.compareTo(r2)
+                                } else {
+                                    val size1 = (s1["size"] ?: "").toString().filter { it.isDigit() }.toLongOrNull() ?: 0L
+                                    val size2 = (s2["size"] ?: "").toString().filter { it.isDigit() }.toLongOrNull() ?: 0L
+                                    size1.compareTo(size2)
+                                }
+                            } ?: sortedDescending[0]
 
                             var url = bestStream["url"]?.toString() ?: ""
 
@@ -2100,6 +2243,29 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
 
                         }
 
+                        // 3. Tier 2: OpenSubtitles v1 Fallback (Reverse-engineered from MovieBox com.transsion.subtitle.helper.d)
+                        if (subtitlesMapped.isEmpty() && movieTitle.isNotBlank()) {
+                            try {
+                                val openSub = com.example.util.OpenSubtitlesHelper.fetchSubtitle(
+                                    client = okHttpClient,
+                                    title = movieTitle,
+                                    isMovie = isMovie,
+                                    season = resSe?.toIntOrNull(),
+                                    episode = resEp?.toIntOrNull(),
+                                    language = "en"
+                                )
+                                if (openSub != null) {
+                                    subtitlesMapped.add(mapOf(
+                                        "lan" to openSub.language,
+                                        "lanName" to openSub.languageName,
+                                        "url" to openSub.url
+                                    ))
+                                }
+                            } catch (e: Exception) {
+                                Log.w("LocalMovieBoxServer", "OpenSubtitles fallback exception: ${e.message}")
+                            }
+                        }
+
                         // Sort subtitles so English and Original appear first in the UI
 
                         val sortedSubtitles = subtitlesMapped.sortedWith { a, b ->
@@ -2120,6 +2286,15 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
                         val discoveredResolutions = linkedSetOf<Int>()
                         val distinctStreams = mutableListOf<Map<String, Any?>>()
                         val seenStreamUrls = mutableSetOf<String>()
+
+                        // Official displayResolutions from /subject-api/play-info/v2 (Section 3.A)
+                        val displayResolutionsStr = (data["displayResolutions"] ?: "").toString()
+                        if (displayResolutionsStr.isNotEmpty()) {
+                            displayResolutionsStr.split(",").forEach { r ->
+                                val num = r.filter { it.isDigit() }.toIntOrNull()
+                                if (num != null && num > 0) discoveredResolutions.add(num)
+                            }
+                        }
 
                         for (st in prioritizedStreams) {
                             var sUrl = st["url"]?.toString() ?: ""
@@ -2201,9 +2376,11 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
 
                         // Add all qualities (1080p, 720p, 480p, 360p...)
                         for (res in sortedResolutionsList) {
-                            val matchingDistinct = distinctStreams.find { 
+                            val matchingDistinct = distinctStreams.filter { 
                                 val qDigits = (it["quality"] as? String)?.filter { c -> c.isDigit() }?.toIntOrNull()
                                 qDigits == res
+                            }.maxByOrNull { 
+                                (it["size"]?.toString() ?: "").filter { c -> c.isDigit() }.toLongOrNull() ?: 0L 
                             }
                             val streamUrl = matchingDistinct?.get("url")?.toString() ?: workingUrl
                             val streamCookie = matchingDistinct?.get("cookie")?.toString() ?: workingCookie
@@ -2708,6 +2885,22 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
 
         }
 
+        var blurHash = ""
+        var averageHue = ""
+        val coverObj = (itemData["cover"] as? Map<*, *>) ?: (itemData["poster"] as? Map<*, *>) ?: (itemData["horizontalPoster"] as? Map<*, *>)
+        if (coverObj != null) {
+            blurHash = (coverObj["thumbnail"] ?: coverObj["blurHash"])?.toString() ?: ""
+            averageHue = (coverObj["averageHueDark"] ?: coverObj["averageHueLight"] ?: coverObj["averageHue"])?.toString() ?: ""
+        }
+        if (blurHash.isEmpty()) {
+            blurHash = (itemData["blurHash"] ?: itemData["thumbnail"])?.toString() ?: ""
+        }
+        if (averageHue.isEmpty()) {
+            averageHue = (itemData["averageHueDark"] ?: itemData["averageHueLight"] ?: itemData["averageHue"])?.toString() ?: ""
+        }
+
+        val optimalPoster = com.example.util.ImageOptimizer.getOptimalUrl(posterUrl, 360)
+
         return mapOf(
 
             "subjectId" to sid,
@@ -2718,9 +2911,15 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
 
             "name" to title,
 
-            "poster" to posterUrl,
+            "poster" to optimalPoster,
 
-            "cover" to posterUrl,
+            "cover" to optimalPoster,
+
+            "originalPoster" to posterUrl,
+
+            "blurHash" to blurHash,
+
+            "averageHue" to averageHue,
 
             "rating" to score,
 

@@ -56,7 +56,7 @@ class PreferencesManager(context: Context) {
         set(value) = prefs.edit().putString(KEY_SESSION_ID_COOKIE, value).apply()
 
     var defaultStreamQuality: String
-        get() = prefs.getString("default_stream_quality", "Auto") ?: "Auto"
+        get() = prefs.getString("default_stream_quality", "1080p") ?: "1080p"
         set(value) = prefs.edit().putString("default_stream_quality", value).apply()
 
     var defaultDownloadQuality: String

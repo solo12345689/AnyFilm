@@ -612,9 +612,26 @@ fun rewriteDetailJson(jsonStr: String, subjectId: String, mockHost: String): Str
                                         "stillPath" to (ep["stillPath"] ?: "")
                                     ))
                                 }
+                                val resEpCounts = (s["resolutionEpCounts"] as? Map<*, *>)?.mapNotNull { (k, v) ->
+                                    val key = k?.toString() ?: return@mapNotNull null
+                                    val count = (v as? Number)?.toInt() ?: v?.toString()?.toIntOrNull() ?: 0
+                                    key to count
+                                }?.toMap() ?: emptyMap()
+
+                                val resList = (s["resolutions"] as? List<*>)?.mapNotNull { r ->
+                                    if (r is Map<*, *>) {
+                                        (r["resolution"] as? Number)?.toInt() ?: r["resolution"]?.toString()?.toIntOrNull()
+                                    } else if (r is Number) {
+                                        r.toInt()
+                                    } else {
+                                        r?.toString()?.toIntOrNull()
+                                    }
+                                } ?: emptyList()
                                 seasonList.add(mapOf<String, Any?>(
                                     "season" to seasonNumber,
-                                    "episodeList" to episodeList
+                                    "episodeList" to episodeList,
+                                    "resolutions" to resList,
+                                    "resolutionEpCounts" to resEpCounts
                                 ))
                             }
                         }

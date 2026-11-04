@@ -81,7 +81,9 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectStreamByPreference(streamList: List<com.example.data.model.StreamItem>, preference: String): com.example.data.model.StreamItem? {
         if (streamList.isEmpty()) return null
-        if (preference.equals("Auto", ignoreCase = true)) return streamList.firstOrNull()
+        if (preference.equals("Auto", ignoreCase = true) || preference.equals("Highest", ignoreCase = true)) {
+            return selectHighestQualityStream(streamList)
+        }
         val prefDigits = preference.filter { it.isDigit() }.toIntOrNull()
         val exact = streamList.find { 
             val qDigits = it.quality.filter { c -> c.isDigit() }.toIntOrNull()
@@ -992,10 +994,11 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                 val imgLoader = coil.Coil.imageLoader(app)
                 (trending.take(15) + categories.take(20)).forEach { item ->
                     if (item.poster.isNotEmpty()) {
+                        val optimalUrl = com.example.util.ImageOptimizer.getOptimalUrl(item.poster, 360)
                         val req = coil.request.ImageRequest.Builder(app)
-                            .data(item.poster)
-                            .memoryCacheKey(item.poster)
-                            .diskCacheKey(item.poster)
+                            .data(optimalUrl)
+                            .memoryCacheKey(optimalUrl)
+                            .diskCacheKey(optimalUrl)
                             .size(width = 330, height = 480)
                             .precision(coil.size.Precision.INEXACT)
                             .build()
@@ -1053,10 +1056,11 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                     launch { repository.getDetail(item.id) }
                     if (item.poster.isNotEmpty()) {
                         launch(Dispatchers.IO) {
+                            val optimalUrl = com.example.util.ImageOptimizer.getOptimalUrl(item.poster, 360)
                             val request = coil.request.ImageRequest.Builder(app)
-                                .data(item.poster)
-                                .memoryCacheKey(item.poster)
-                                .diskCacheKey(item.poster)
+                                .data(optimalUrl)
+                                .memoryCacheKey(optimalUrl)
+                                .diskCacheKey(optimalUrl)
                                 .size(width = 330, height = 480)
                                 .precision(coil.size.Precision.INEXACT)
                                 .build()
@@ -1307,6 +1311,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                         subject.id,
                         ep.seasonNumber,
                         ep.episodeNumber,
+                        quality = targetQuality ?: "1080p",
                         resourceId = resId
                     )
                     val stream = (if (targetQuality != null) selectStreamByPreference(playInfoResult.streamList, targetQuality) else null)

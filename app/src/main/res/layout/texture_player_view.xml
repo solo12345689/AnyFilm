@@ -5,7 +5,7 @@
     android:id="@+id/player_view"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    app:surface_type="texture_view"
+    app:surface_type="surface_view"
     app:use_controller="false"
     app:resize_mode="fit"
     app:show_subtitle_button="false"

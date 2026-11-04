@@ -579,7 +579,7 @@ fun SettingsScreen(
                 if (showSettingsTelegramDialog) {
                     TelegramJoinDialog(
                         onDismiss = { showSettingsTelegramDialog = false },
-                        telegramUrl = "https://t.me/Gengaworldofficial"
+                        telegramUrl = "https://t.me/AnyFilmOfficial"
                     )
                 }
 
@@ -667,8 +667,8 @@ fun SettingsScreen(
                                     )
                                     val appVersion = remember {
                                         try {
-                                            context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "4.1"
-                                        } catch (e: Exception) { "4.1" }
+                                            context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "4.2"
+                                        } catch (e: Exception) { "4.2" }
                                     }
                                     Text(
                                         text = if (viewModel.isCheckingUpdate) "Checking latest version..." else "Current: v$appVersion",

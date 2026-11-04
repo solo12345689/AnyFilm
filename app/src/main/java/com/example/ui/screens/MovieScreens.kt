@@ -267,6 +267,20 @@ object VideoCacheManager {
         }
         return simpleCache!!
     }
+
+    /**
+     * Token-agnostic cache key matching MovieBox's w.h0(url).
+     * Extracts only scheme + authority + path, stripping signed token queries (?Expires, ?Signature, ?sign, ?t).
+     * Guarantees 100% cache hits even across session token renewals.
+     */
+    fun getCacheKey(uri: android.net.Uri): String {
+        val path = uri.path ?: ""
+        return if (uri.scheme != null && uri.authority != null && path.isNotEmpty()) {
+            "${uri.scheme}://${uri.authority}$path"
+        } else {
+            uri.toString()
+        }
+    }
 }
 
 @Composable
@@ -575,7 +589,7 @@ fun LockoutScreen(viewModel: MovieViewModel) {
 @Composable
 fun TelegramJoinDialog(
     onDismiss: () -> Unit,
-    telegramUrl: String = "https://t.me/Gengaworldofficial"
+    telegramUrl: String = "https://t.me/AnyFilmOfficial"
 ) {
     val context = LocalContext.current
 
@@ -1285,7 +1299,7 @@ fun MainContent(viewModel: MovieViewModel) {
                     prefs.edit().putLong("last_telegram_prompt_timestamp", System.currentTimeMillis()).apply()
                     showTelegramDialog = false
                 },
-                telegramUrl = "https://t.me/Gengaworldofficial"
+                telegramUrl = "https://t.me/AnyFilmOfficial"
             )
         }
     }
@@ -1484,19 +1498,30 @@ fun MovieGridItem(movie: MovieSubject, showRating: Boolean = false, onClick: () 
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(8.dp))
         ) {
+            val optimalPosterUrl = androidx.compose.runtime.remember(movie.poster) {
+                com.example.util.ImageOptimizer.getOptimalUrl(movie.poster, 360)
+            }
+            val placeholderColor = androidx.compose.runtime.remember(movie.averageHue) {
+                com.example.util.ImageOptimizer.parseAverageHue(movie.averageHue)
+            }
+            val placeholderPainter = androidx.compose.runtime.remember(movie.blurHash, placeholderColor) {
+                com.example.util.ImageOptimizer.getBlurHashPainter(movie.blurHash, 20, 20)
+                    ?: androidx.compose.ui.graphics.painter.ColorPainter(placeholderColor)
+            }
+
             AsyncImage(
                 model = coil.request.ImageRequest.Builder(LocalContext.current)
-                    .data(movie.poster)
-                    .memoryCacheKey(movie.poster)
-                    .diskCacheKey(movie.poster)
+                    .data(optimalPosterUrl)
+                    .memoryCacheKey(optimalPosterUrl)
+                    .diskCacheKey(optimalPosterUrl)
                     .size(width = 330, height = 480) // Decode at exact 110dp x 160dp card resolution (~3x density) like Vega
                     .precision(coil.size.Precision.INEXACT) // Fast decoding without full uncompressed bitmap in RAM
                     .crossfade(false)
                     .build(),
                 contentDescription = movie.name,
                 contentScale = ContentScale.Crop,
-                placeholder = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color(0xFF1E1E22)),
-                error = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color(0xFF1E1E22)),
+                placeholder = placeholderPainter,
+                error = placeholderPainter,
                 modifier = Modifier.fillMaxSize()
             )
             // Rating Tag
@@ -1724,11 +1749,14 @@ fun SearchScreen(viewModel: MovieViewModel) {
                             .padding(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        val searchThumb = androidx.compose.runtime.remember(movie.poster) {
+                            com.example.util.ImageOptimizer.getOptimalUrl(movie.poster, 180)
+                        }
                         AsyncImage(
-                            model = movie.poster,
+                            model = searchThumb,
                             contentDescription = movie.name,
                             contentScale = ContentScale.Crop,
-                            placeholder = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color.DarkGray),
+                            placeholder = androidx.compose.ui.graphics.painter.ColorPainter(com.example.util.ImageOptimizer.parseAverageHue(movie.averageHue, androidx.compose.ui.graphics.Color.DarkGray)),
                             error = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color.DarkGray),
                             modifier = Modifier
                                 .size(width = 60.dp, height = 90.dp)
@@ -2213,6 +2241,7 @@ fun PlayerScreen(viewModel: MovieViewModel) {
 
     var activeSheet by remember { mutableStateOf<String?>(null) }
     var isDownloadSelectionMode by remember { mutableStateOf(false) }
+    var selectedDownloadQuality by remember { mutableStateOf(viewModel.defaultDownloadQuality.ifEmpty { "1080p" }) }
     val selectedDownloadEpisodes = remember { androidx.compose.runtime.mutableStateListOf<com.example.data.model.Episode>() }
     val configuration = androidx.compose.ui.platform.LocalConfiguration.current
     val screenWidth = configuration.screenWidthDp.dp
@@ -2310,6 +2339,7 @@ fun PlayerScreen(viewModel: MovieViewModel) {
             .build()
             
         val renderersFactory = androidx.media3.exoplayer.DefaultRenderersFactory(context).apply {
+            setExtensionRendererMode(androidx.media3.exoplayer.DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
             setMediaCodecSelector { mimeType, requiresSecure, requiresTunneling ->
                 val decoders = androidx.media3.exoplayer.mediacodec.MediaCodecUtil.getDecoderInfos(mimeType, requiresSecure, requiresTunneling)
                 decoders.sortedWith { d1, d2 ->
@@ -2318,8 +2348,8 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                     val sw1 = n1.contains("google") || n1.contains("c2.android") || n1.contains("sw")
                     val sw2 = n2.contains("google") || n2.contains("c2.android") || n2.contains("sw")
                     when {
-                        sw1 && !sw2 -> -1
-                        !sw1 && sw2 -> 1
+                        !sw1 && sw2 -> -1 // Priority 1: Hardware decoders (Adreno, Exynos, Mali, Tensor)
+                        sw1 && !sw2 -> 1  // Priority 2: Software fallback
                         else -> 0
                     }
                 }
@@ -2346,8 +2376,8 @@ fun PlayerScreen(viewModel: MovieViewModel) {
             .setBufferDurationsMs(
                 25000,   // minBufferMs (25 seconds minimum buffer before idle)
                 120000,  // maxBufferMs (2 minutes max buffer limit)
-                1000,    // bufferForPlaybackMs (Only 1.0 second needed to start instantly!)
-                2000     // bufferForPlaybackAfterRebufferMs (Only 2.0 seconds needed to recover)
+                500,     // bufferForPlaybackMs (Only 0.5s needed to start instantly, matching MovieBox np.d.java!)
+                1500     // bufferForPlaybackAfterRebufferMs (Only 1.5 seconds needed to recover)
             )
             .setTargetBufferBytes(targetBufferBytes) // Dynamically calculated safe limit
             .setPrioritizeTimeOverSizeThresholds(true)
@@ -2404,6 +2434,7 @@ fun PlayerScreen(viewModel: MovieViewModel) {
             val cacheDataSourceFactory = androidx.media3.datasource.cache.CacheDataSource.Factory()
                 .setCache(VideoCacheManager.getCache(context))
                 .setUpstreamDataSourceFactory(httpDataSourceFactory)
+                .setCacheKeyFactory { VideoCacheManager.getCacheKey(it.uri) }
                 .setFlags(androidx.media3.datasource.cache.CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
 
             val mediaItemBuilder = MediaItem.Builder().setUri(Uri.parse(streamUrl))
@@ -2467,6 +2498,8 @@ fun PlayerScreen(viewModel: MovieViewModel) {
             exoPlayer.playWhenReady = viewModel.isPlaying
         }
     }
+
+
 
     // Buffering listener
     var isBuffering by remember { mutableStateOf(false) }
@@ -2609,6 +2642,8 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                     },
                     modifier = Modifier.fillMaxSize()
                 )
+
+
 
                 // Universal Gestures Layer (Single tap toggles UI, Double tap Left = -5s, Center = Pause/Play, Right = +10s)
                 val density = androidx.compose.ui.platform.LocalDensity.current
@@ -3361,15 +3396,74 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                             }
                         }
 
+                        // Quality Option Selector (Only visible in Download Selection Mode)
+                        if (isDownloadSelectionMode && subject.isTvShow) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 10.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                val activeSeasonInfo = subject.seasonList.find { it.season == viewModel.selectedSeason }
+                                val seasonResolutions = activeSeasonInfo?.resolutions?.takeIf { it.isNotEmpty() }?.sorted()?.map { "${it}p" }
+                                val downloadQualities = seasonResolutions ?: listOf("480p", "720p", "1080p")
+
+                                androidx.compose.runtime.LaunchedEffect(downloadQualities) {
+                                    if (downloadQualities.isNotEmpty() && !downloadQualities.any { it.equals(selectedDownloadQuality, ignoreCase = true) }) {
+                                        selectedDownloadQuality = downloadQualities.last()
+                                    }
+                                }
+
+                                downloadQualities.forEach { q ->
+                                    val isSelected = selectedDownloadQuality.equals(q, ignoreCase = true)
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(if (isSelected) Color(0xFF115E59) else Color(0xFF26262A))
+                                            .then(
+                                                if (isSelected) Modifier.border(1.dp, Color(0xFF2DD4BF), RoundedCornerShape(8.dp)) else Modifier
+                                            )
+                                            .clickable {
+                                                if (!selectedDownloadQuality.equals(q, ignoreCase = true)) {
+                                                    selectedDownloadQuality = q
+                                                    selectedDownloadEpisodes.clear()
+                                                }
+                                            }
+                                            .padding(horizontal = 16.dp, vertical = 7.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = q.uppercase(),
+                                            color = if (isSelected) Color(0xFF2DD4BF) else Color(0xFF9CA3AF),
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                            fontSize = 13.sp
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
                         // Episodes Section: Download Selection List OR Normal 4-Column Grid
                         if (subject.isTvShow) {
                             if (isDownloadSelectionMode) {
-                                // Multi-select download list (No video length/size shown, right-side red circle)
+                                val activeSeasonInfo = subject.seasonList.find { it.season == viewModel.selectedSeason }
+                                val currentResDigits = selectedDownloadQuality.filter { it.isDigit() }
+                                val maxEpForQuality = activeSeasonInfo?.resolutionEpCounts?.get(currentResDigits) ?: activeSeasonInfo?.resolutionEpCounts?.get(selectedDownloadQuality.lowercase())
+                                val availableEpisodesForQuality = androidx.compose.runtime.remember(viewModel.episodesList, selectedDownloadQuality, activeSeasonInfo) {
+                                    if (maxEpForQuality != null && maxEpForQuality > 0) {
+                                        viewModel.episodesList.filter { it.episodeNumber <= maxEpForQuality }
+                                    } else {
+                                        viewModel.episodesList
+                                    }
+                                }
+
+                                // Multi-select download list (Filtered by selected video quality)
                                 Column(
                                     verticalArrangement = Arrangement.spacedBy(8.dp),
                                     modifier = Modifier.fillMaxWidth().padding(bottom = 120.dp) // generous space for sticky bottom bar + nav insets
                                 ) {
-                                    viewModel.episodesList.forEach { ep ->
+                                    availableEpisodesForQuality.forEach { ep ->
                                         val isSelected = selectedDownloadEpisodes.any { it.episodeId == ep.episodeId }
                                         Card(
                                             modifier = Modifier
@@ -3499,7 +3593,16 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         // Select All toggle
-                        val allSelected = selectedDownloadEpisodes.size == viewModel.episodesList.size && viewModel.episodesList.isNotEmpty()
+                        val activeSeasonInfoBottom = subject.seasonList.find { it.season == viewModel.selectedSeason }
+                        val currentResDigitsBottom = selectedDownloadQuality.filter { it.isDigit() }
+                        val maxEpForQualityBottom = activeSeasonInfoBottom?.resolutionEpCounts?.get(currentResDigitsBottom) ?: activeSeasonInfoBottom?.resolutionEpCounts?.get(selectedDownloadQuality.lowercase())
+                        val availableEpisodesBottom = if (maxEpForQualityBottom != null && maxEpForQualityBottom > 0) {
+                            viewModel.episodesList.filter { it.episodeNumber <= maxEpForQualityBottom }
+                        } else {
+                            viewModel.episodesList
+                        }
+
+                        val allSelected = selectedDownloadEpisodes.size == availableEpisodesBottom.size && availableEpisodesBottom.isNotEmpty()
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
@@ -3509,7 +3612,7 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                                         selectedDownloadEpisodes.clear()
                                     } else {
                                         selectedDownloadEpisodes.clear()
-                                        selectedDownloadEpisodes.addAll(viewModel.episodesList)
+                                        selectedDownloadEpisodes.addAll(availableEpisodesBottom)
                                     }
                                 }
                                 .padding(6.dp)
@@ -3547,7 +3650,7 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                             onClick = {
                                 if (selectedDownloadEpisodes.isNotEmpty()) {
                                     val listToDownload = selectedDownloadEpisodes.toList()
-                                    viewModel.downloadEpisodesBatch(context, listToDownload)
+                                    viewModel.downloadEpisodesBatch(context, listToDownload, targetQuality = selectedDownloadQuality)
                                     isDownloadSelectionMode = false
                                     selectedDownloadEpisodes.clear()
                                 } else {
@@ -3954,6 +4057,268 @@ fun openInExternalPlayer(context: android.content.Context, file: java.io.File, o
     }
 }
 
+fun shareVideoFile(context: android.content.Context, file: java.io.File) {
+    try {
+        val uri = androidx.core.content.FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.provider",
+            file
+        )
+        val shareIntent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+            type = "video/*"
+            putExtra(android.content.Intent.EXTRA_STREAM, uri)
+            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        val chooser = android.content.Intent.createChooser(shareIntent, "Share Video")
+        chooser.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(chooser)
+    } catch (e: Exception) {
+        android.widget.Toast.makeText(context, "Could not share video: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+    }
+}
+
+fun saveVideoToCameraRoll(context: android.content.Context, file: java.io.File) {
+    if (!file.exists()) {
+        android.widget.Toast.makeText(context, "File does not exist", android.widget.Toast.LENGTH_SHORT).show()
+        return
+    }
+
+    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+        try {
+            val displayName = file.name
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                val contentResolver = context.contentResolver
+                val values = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.Video.Media.DISPLAY_NAME, displayName)
+                    put(android.provider.MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                    put(android.provider.MediaStore.Video.Media.RELATIVE_PATH, "DCIM/Camera")
+                    put(android.provider.MediaStore.Video.Media.IS_PENDING, 1)
+                }
+
+                val collection = android.provider.MediaStore.Video.Media.getContentUri(android.provider.MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                val itemUri = contentResolver.insert(collection, values) ?: throw Exception("Could not create MediaStore entry in DCIM/Camera")
+
+                contentResolver.openOutputStream(itemUri)?.use { outStream ->
+                    file.inputStream().use { inStream ->
+                        inStream.copyTo(outStream)
+                    }
+                }
+
+                values.clear()
+                values.put(android.provider.MediaStore.Video.Media.IS_PENDING, 0)
+                contentResolver.update(itemUri, values, null, null)
+            } else {
+                val dcimDir = java.io.File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DCIM), "Camera")
+                if (!dcimDir.exists()) dcimDir.mkdirs()
+                val targetFile = java.io.File(dcimDir, displayName)
+                file.copyTo(targetFile, overwrite = true)
+                android.media.MediaScannerConnection.scanFile(
+                    context,
+                    arrayOf(targetFile.absolutePath),
+                    arrayOf("video/mp4"),
+                    null
+                )
+            }
+
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                android.widget.Toast.makeText(context, "Saved!", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                android.widget.Toast.makeText(context, "Failed to save: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+}
+
+@Composable
+fun DownloadItemOptionsMenu(
+    file: java.io.File,
+    iconSize: androidx.compose.ui.unit.Dp = 20.dp,
+    onDelete: () -> Unit
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var menuExpanded by remember { mutableStateOf(false) }
+
+    Box {
+        IconButton(
+            onClick = { menuExpanded = true },
+            modifier = Modifier.size(32.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Filled.MoreVert,
+                contentDescription = "Options",
+                tint = TextSecondary,
+                modifier = Modifier.size(iconSize)
+            )
+        }
+
+        DropdownMenu(
+            expanded = menuExpanded,
+            onDismissRequest = { menuExpanded = false },
+            shape = RoundedCornerShape(12.dp),
+            containerColor = Color(0xFF222226),
+            tonalElevation = 0.dp,
+            shadowElevation = 8.dp
+        ) {
+            DropdownMenuItem(
+                text = { Text("Save", color = Color.White, fontSize = 14.sp) },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Filled.Save,
+                        contentDescription = "Save",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
+                },
+                onClick = {
+                    menuExpanded = false
+                    saveVideoToCameraRoll(context, file)
+                }
+            )
+
+            DropdownMenuItem(
+                text = { Text("Share", color = Color.White, fontSize = 14.sp) },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Filled.Share,
+                        contentDescription = "Share",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
+                },
+                onClick = {
+                    menuExpanded = false
+                    shareVideoFile(context, file)
+                }
+            )
+
+            DropdownMenuItem(
+                text = { Text("Delete", color = Color(0xFFEF4444), fontSize = 14.sp) },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Filled.Delete,
+                        contentDescription = "Delete",
+                        tint = Color(0xFFEF4444),
+                        modifier = Modifier.size(18.dp)
+                    )
+                },
+                onClick = {
+                    menuExpanded = false
+                    onDelete()
+                }
+            )
+        }
+    }
+}
+
+fun toggleDownloadPauseResume(
+    context: android.content.Context,
+    active: com.example.ui.viewmodel.ActiveDownload,
+    isPaused: Boolean
+) {
+    val manager = context.getSystemService(android.content.Context.DOWNLOAD_SERVICE) as? android.app.DownloadManager ?: return
+    var succeeded = false
+
+    if (isPaused) {
+        // --- RESUME ---
+        // 1. Try AOSP hidden method: resumeDownload(long... ids)
+        try {
+            val method = manager.javaClass.getMethod("resumeDownload", LongArray::class.java)
+            method.invoke(manager, longArrayOf(active.id))
+            succeeded = true
+        } catch (_: Throwable) {
+            // 2. Try single-primitive method: resumeDownload(long id)
+            try {
+                val method = manager.javaClass.getMethod("resumeDownload", Long::class.javaPrimitiveType)
+                method.invoke(manager, active.id)
+                succeeded = true
+            } catch (_: Throwable) {}
+        }
+
+        // 3. Try direct ContentResolver update (Downloads.Impl CONTROL_RUN = 0)
+        if (!succeeded) {
+            try {
+                val baseUri = android.net.Uri.parse("content://downloads/my_downloads")
+                val values = android.content.ContentValues().apply {
+                    put("control", 0) // CONTROL_RUN
+                    put("status", 190) // STATUS_PENDING
+                }
+                val updated = context.contentResolver.update(
+                    baseUri,
+                    values,
+                    "_id = ?",
+                    arrayOf(active.id.toString())
+                )
+                if (updated > 0) succeeded = true
+            } catch (_: Throwable) {}
+        }
+
+        // 4. Try restartDownload(long... ids)
+        if (!succeeded) {
+            try {
+                val method = manager.javaClass.getMethod("restartDownload", LongArray::class.java)
+                method.invoke(manager, longArrayOf(active.id))
+                succeeded = true
+            } catch (_: Throwable) {}
+        }
+
+        // 5. Fallback for vendor-locked ROMs (Realme / ColorOS): Re-enqueue download if stalled/paused
+        if (!succeeded && active.url.isNotBlank()) {
+            try {
+                manager.remove(active.id)
+                downloadVideo(context, active.url, active.title, showToast = false)
+                succeeded = true
+            } catch (_: Throwable) {}
+        }
+
+        if (succeeded) {
+            android.widget.Toast.makeText(context, "Resuming download...", android.widget.Toast.LENGTH_SHORT).show()
+        } else {
+            android.widget.Toast.makeText(context, "Could not resume download on this device", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    } else {
+        // --- PAUSE ---
+        // 1. Try AOSP hidden method: pauseDownload(long... ids)
+        try {
+            val method = manager.javaClass.getMethod("pauseDownload", LongArray::class.java)
+            method.invoke(manager, longArrayOf(active.id))
+            succeeded = true
+        } catch (_: Throwable) {
+            // 2. Try single-primitive method: pauseDownload(long id)
+            try {
+                val method = manager.javaClass.getMethod("pauseDownload", Long::class.javaPrimitiveType)
+                method.invoke(manager, active.id)
+                succeeded = true
+            } catch (_: Throwable) {}
+        }
+
+        // 3. Try direct ContentResolver update (Downloads.Impl CONTROL_PAUSED = 1)
+        if (!succeeded) {
+            try {
+                val baseUri = android.net.Uri.parse("content://downloads/my_downloads")
+                val values = android.content.ContentValues().apply {
+                    put("control", 1) // CONTROL_PAUSED
+                    put("status", 193) // STATUS_PAUSED_BY_APP
+                }
+                val updated = context.contentResolver.update(
+                    baseUri,
+                    values,
+                    "_id = ?",
+                    arrayOf(active.id.toString())
+                )
+                if (updated > 0) succeeded = true
+            } catch (_: Throwable) {}
+        }
+
+        if (succeeded) {
+            android.widget.Toast.makeText(context, "Download paused", android.widget.Toast.LENGTH_SHORT).show()
+        } else {
+            android.widget.Toast.makeText(context, "Pause is not supported on this device", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DownloadScreen(viewModel: MovieViewModel) {
@@ -4186,27 +4551,7 @@ fun DownloadScreen(viewModel: MovieViewModel) {
 
                                 IconButton(
                                     onClick = {
-                                        if (manager != null) {
-                                            if (isPaused) {
-                                                // Resume: resume download using DownloadManager internal reflection or re-enqueue
-                                                try {
-                                                    val resumeMethod = manager.javaClass.getMethod("resumeDownload", Long::class.javaPrimitiveType)
-                                                    resumeMethod.invoke(manager, active.id)
-                                                } catch (_: Exception) {
-                                                    // Fallback: restart or re-request if reflection not available on vendor ROM
-                                                    try {
-                                                        val restartMethod = manager.javaClass.getMethod("restartDownload", LongArray::class.java)
-                                                        restartMethod.invoke(manager, longArrayOf(active.id))
-                                                    } catch (_: Exception) {}
-                                                }
-                                            } else {
-                                                // Pause download
-                                                try {
-                                                    val pauseMethod = manager.javaClass.getMethod("pauseDownload", Long::class.javaPrimitiveType)
-                                                    pauseMethod.invoke(manager, active.id)
-                                                } catch (_: Exception) {}
-                                            }
-                                        }
+                                        toggleDownloadPauseResume(context, active, isPaused)
                                     },
                                     modifier = Modifier.size(32.dp)
                                 ) {
@@ -4317,6 +4662,68 @@ fun DownloadScreen(viewModel: MovieViewModel) {
                                         )
                                     }
                                     if (filesForShow.size > 1) {
+                                        var showMenuExpanded by remember { mutableStateOf(false) }
+                                        Box {
+                                            IconButton(
+                                                onClick = { showMenuExpanded = true },
+                                                modifier = Modifier.size(32.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Filled.MoreVert,
+                                                    contentDescription = "Options",
+                                                    tint = TextSecondary,
+                                                    modifier = Modifier.size(20.dp)
+                                                )
+                                            }
+                                            DropdownMenu(
+                                                expanded = showMenuExpanded,
+                                                onDismissRequest = { showMenuExpanded = false },
+                                                shape = RoundedCornerShape(12.dp),
+                                                containerColor = Color(0xFF222226),
+                                                tonalElevation = 0.dp,
+                                                shadowElevation = 8.dp
+                                            ) {
+                                                DropdownMenuItem(
+                                                    text = { Text("Save All (${filesForShow.size})", color = Color.White, fontSize = 14.sp) },
+                                                    leadingIcon = {
+                                                        Icon(
+                                                            imageVector = Icons.Filled.Save,
+                                                            contentDescription = "Save All",
+                                                            tint = Color.White,
+                                                            modifier = Modifier.size(18.dp)
+                                                        )
+                                                    },
+                                                    onClick = {
+                                                        showMenuExpanded = false
+                                                        filesForShow.forEach { f ->
+                                                            saveVideoToCameraRoll(context, f)
+                                                        }
+                                                    }
+                                                )
+
+                                                DropdownMenuItem(
+                                                    text = { Text("Delete All (${filesForShow.size})", color = Color(0xFFEF4444), fontSize = 14.sp) },
+                                                    leadingIcon = {
+                                                        Icon(
+                                                            imageVector = Icons.Filled.Delete,
+                                                            contentDescription = "Delete All",
+                                                            tint = Color(0xFFEF4444),
+                                                            modifier = Modifier.size(18.dp)
+                                                        )
+                                                    },
+                                                    onClick = {
+                                                        showMenuExpanded = false
+                                                        coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                                            filesForShow.forEach { f -> f.delete() }
+                                                            val showPoster = java.io.File(anyFilmDir, "$safeShowPrefix.jpg")
+                                                            if (showPoster.exists()) showPoster.delete()
+                                                            anyFilmDir.listFiles()?.filter { it.extension.equals("jpg", ignoreCase = true) && it.nameWithoutExtension.startsWith(safeShowPrefix) }?.forEach { it.delete() }
+                                                            viewModel.scanDownloadedFiles()
+                                                        }
+                                                    }
+                                                )
+                                            }
+                                        }
                                         Icon(
                                             imageVector = if (isExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
                                             contentDescription = "Expand",
@@ -4325,24 +4732,21 @@ fun DownloadScreen(viewModel: MovieViewModel) {
                                         )
                                     } else if (filesForShow.isNotEmpty()) {
                                         val singleFile = filesForShow.first()
-                                        IconButton(onClick = {
-                                            coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                                                val singlePoster = java.io.File(anyFilmDir, "${singleFile.nameWithoutExtension}.jpg")
-                                                if (singlePoster.exists()) singlePoster.delete()
-                                                val showPoster = java.io.File(anyFilmDir, "$safeShowPrefix.jpg")
-                                                if (showPoster.exists()) showPoster.delete()
-                                                anyFilmDir.listFiles()?.filter { it.extension.equals("jpg", ignoreCase = true) && it.nameWithoutExtension.startsWith(safeShowPrefix) }?.forEach { it.delete() }
-                                                singleFile.delete()
-                                                viewModel.scanDownloadedFiles()
+                                        DownloadItemOptionsMenu(
+                                            file = singleFile,
+                                            iconSize = 20.dp,
+                                            onDelete = {
+                                                coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                                    val singlePoster = java.io.File(anyFilmDir, "${singleFile.nameWithoutExtension}.jpg")
+                                                    if (singlePoster.exists()) singlePoster.delete()
+                                                    val showPoster = java.io.File(anyFilmDir, "$safeShowPrefix.jpg")
+                                                    if (showPoster.exists()) showPoster.delete()
+                                                    anyFilmDir.listFiles()?.filter { it.extension.equals("jpg", ignoreCase = true) && it.nameWithoutExtension.startsWith(safeShowPrefix) }?.forEach { it.delete() }
+                                                    singleFile.delete()
+                                                    viewModel.scanDownloadedFiles()
+                                                }
                                             }
-                                        }) {
-                                            Icon(
-                                                Icons.Filled.Delete,
-                                                contentDescription = "Delete",
-                                                tint = TextSecondary,
-                                                modifier = Modifier.size(20.dp)
-                                            )
-                                        }
+                                        )
                                     }
                                 }
                                 
@@ -4366,23 +4770,25 @@ fun DownloadScreen(viewModel: MovieViewModel) {
                                                     Text(text = epName, color = TextPrimary, fontSize = 13.sp)
                                                     Text(text = "${(file.length() / (1024 * 1024))} MB", color = TextSecondary, fontSize = 11.sp)
                                                 }
-                                                IconButton(onClick = { 
-                                                    coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                                                        if (filesForShow.size <= 1) {
-                                                            // Last episode remaining: clean up posters
-                                                            val epPoster = java.io.File(anyFilmDir, "${file.nameWithoutExtension}.jpg")
-                                                            if (epPoster.exists()) epPoster.delete()
-                                                            val showPoster = java.io.File(anyFilmDir, "$safeShowPrefix.jpg")
-                                                            if (showPoster.exists()) showPoster.delete()
-                                                            anyFilmDir.listFiles()?.filter { it.extension.equals("jpg", ignoreCase = true) && it.nameWithoutExtension.startsWith(safeShowPrefix) }?.forEach { it.delete() }
+                                                DownloadItemOptionsMenu(
+                                                    file = file,
+                                                    iconSize = 18.dp,
+                                                    onDelete = {
+                                                        coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                                            if (filesForShow.size <= 1) {
+                                                                // Last episode remaining: clean up posters
+                                                                val epPoster = java.io.File(anyFilmDir, "${file.nameWithoutExtension}.jpg")
+                                                                if (epPoster.exists()) epPoster.delete()
+                                                                val showPoster = java.io.File(anyFilmDir, "$safeShowPrefix.jpg")
+                                                                if (showPoster.exists()) showPoster.delete()
+                                                                anyFilmDir.listFiles()?.filter { it.extension.equals("jpg", ignoreCase = true) && it.nameWithoutExtension.startsWith(safeShowPrefix) }?.forEach { it.delete() }
+                                                            }
+                                                            // When multiple episodes exist, ONLY delete the video file, preserving posters for the remaining episodes
+                                                            file.delete()
+                                                            viewModel.scanDownloadedFiles()
                                                         }
-                                                        // When multiple episodes exist, ONLY delete the video file, preserving posters for the remaining episodes
-                                                        file.delete()
-                                                        viewModel.scanDownloadedFiles()
                                                     }
-                                                }) {
-                                                    Icon(Icons.Filled.Delete, contentDescription = "Delete", tint = TextSecondary, modifier = Modifier.size(18.dp))
-                                                }
+                                                )
                                             }
                                         }
                                     }

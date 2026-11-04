@@ -215,19 +215,30 @@ fun MovieGridItem(movie: MovieSubject, showRating: Boolean = false, onClick: () 
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(8.dp))
         ) {
+            val optimalPosterUrl = androidx.compose.runtime.remember(movie.poster) {
+                com.example.util.ImageOptimizer.getOptimalUrl(movie.poster, 360)
+            }
+            val placeholderColor = androidx.compose.runtime.remember(movie.averageHue) {
+                com.example.util.ImageOptimizer.parseAverageHue(movie.averageHue)
+            }
+            val placeholderPainter = androidx.compose.runtime.remember(movie.blurHash, placeholderColor) {
+                com.example.util.ImageOptimizer.getBlurHashPainter(movie.blurHash, 20, 20)
+                    ?: androidx.compose.ui.graphics.painter.ColorPainter(placeholderColor)
+            }
+
             AsyncImage(
                 model = coil.request.ImageRequest.Builder(LocalContext.current)
-                    .data(movie.poster)
-                    .memoryCacheKey(movie.poster)
-                    .diskCacheKey(movie.poster)
+                    .data(optimalPosterUrl)
+                    .memoryCacheKey(optimalPosterUrl)
+                    .diskCacheKey(optimalPosterUrl)
                     .size(width = 330, height = 480)
                     .precision(coil.size.Precision.INEXACT)
                     .crossfade(false)
                     .build(),
                 contentDescription = movie.name,
                 contentScale = ContentScale.Crop,
-                placeholder = androidx.compose.ui.graphics.painter.ColorPainter(Color(0xFF1E1E22)),
-                error = androidx.compose.ui.graphics.painter.ColorPainter(Color(0xFF1E1E22)),
+                placeholder = placeholderPainter,
+                error = placeholderPainter,
                 modifier = Modifier.fillMaxSize()
             )
             // Rating Tag

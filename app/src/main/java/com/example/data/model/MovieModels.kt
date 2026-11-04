@@ -7,7 +7,9 @@ import com.squareup.moshi.ToJson
 @JsonClass(generateAdapter = true)
 data class SeasonInfo(
     val season: Int,
-    val episodeList: List<EpisodeInfo> = emptyList()
+    val episodeList: List<EpisodeInfo> = emptyList(),
+    val resolutions: List<Int> = emptyList(),
+    val resolutionEpCounts: Map<String, Int> = emptyMap()
 )
 
 @JsonClass(generateAdapter = true)
@@ -40,7 +42,9 @@ data class MovieSubject(
     val cast: List<CastMember> = emptyList(),
     val dubs: List<String> = emptyList(),
     val seasonList: List<SeasonInfo> = emptyList(),
-    val resourceDetectors: List<ResourceDetector> = emptyList()
+    val resourceDetectors: List<ResourceDetector> = emptyList(),
+    val blurHash: String? = null,
+    val averageHue: String? = null
 )
 
 @JsonClass(generateAdapter = true)
@@ -229,6 +233,30 @@ class MovieSubjectAdapter {
             posterUrl = "https:$posterUrl"
         }
 
+        var blurHash: String? = null
+        var averageHue: String? = null
+
+        val coverMaps = listOfNotNull(
+            item["cover"] as? Map<*, *>,
+            item["poster"] as? Map<*, *>,
+            item["horizontalPoster"] as? Map<*, *>,
+            item["horizontalCover"] as? Map<*, *>
+        )
+        for (cm in coverMaps) {
+            if (blurHash == null) {
+                blurHash = (cm["thumbnail"] ?: cm["blurHash"])?.toString()
+            }
+            if (averageHue == null) {
+                averageHue = (cm["averageHueDark"] ?: cm["averageHueLight"] ?: cm["averageHue"])?.toString()
+            }
+        }
+        if (blurHash == null) {
+            blurHash = (item["blurHash"] ?: item["thumbnail"] ?: map["blurHash"])?.toString()
+        }
+        if (averageHue == null) {
+            averageHue = (item["averageHue"] ?: item["averageHueDark"] ?: map["averageHue"])?.toString()
+        }
+
         val ratingRaw = (item["imdbRatingValue"] ?: item["imdbRate"] ?: item["starRating"] ?: item["score"] ?: map["rating"])?.toString()?.trim()
         val rating = if (ratingRaw.isNullOrEmpty() || ratingRaw.equals("null", ignoreCase = true) || ratingRaw == "0" || ratingRaw == "0.0") null else ratingRaw
         
@@ -341,7 +369,29 @@ class MovieSubjectAdapter {
                             }
                         }
                     }
-                    seasonList.add(SeasonInfo(season = seasonNum, episodeList = epsList))
+                    val resEpCounts = mutableMapOf<String, Int>()
+                    val resList = (s["resolutions"] as? List<*>)?.mapNotNull { r ->
+                        if (r is Map<*, *>) {
+                            val resVal = (r["resolution"] as? Number)?.toInt() ?: r["resolution"]?.toString()?.toIntOrNull()
+                            val epVal = (r["epNum"] as? Number)?.toInt() ?: r["epNum"]?.toString()?.toIntOrNull() ?: 0
+                            if (resVal != null) {
+                                resEpCounts[resVal.toString()] = epVal
+                                resVal
+                            } else null
+                        } else if (r is Number) {
+                            r.toInt()
+                        } else {
+                            r?.toString()?.toIntOrNull()
+                        }
+                    } ?: emptyList()
+                    val existingCounts = (s["resolutionEpCounts"] as? Map<*, *>)?.mapNotNull { (k, v) ->
+                        val key = k?.toString() ?: return@mapNotNull null
+                        val count = (v as? Number)?.toInt() ?: v?.toString()?.toIntOrNull() ?: 0
+                        key to count
+                    }?.toMap() ?: emptyMap()
+                    resEpCounts.putAll(existingCounts)
+
+                    seasonList.add(SeasonInfo(season = seasonNum, episodeList = epsList, resolutions = resList, resolutionEpCounts = resEpCounts))
                 }
             }
         }
@@ -376,7 +426,9 @@ class MovieSubjectAdapter {
             cast = castList,
             dubs = dubsList,
             seasonList = seasonList,
-            resourceDetectors = detectorsList
+            resourceDetectors = detectorsList,
+            blurHash = blurHash,
+            averageHue = averageHue
         )
     }
 
@@ -395,9 +447,13 @@ class MovieSubjectAdapter {
             "duration" to subject.duration,
             "cast" to subject.cast,
             "dubs" to subject.dubs,
+            "blurHash" to subject.blurHash,
+            "averageHue" to subject.averageHue,
             "seasonList" to subject.seasonList.map { s ->
                 mapOf(
                     "season" to s.season,
+                    "resolutions" to s.resolutions,
+                    "resolutionEpCounts" to s.resolutionEpCounts,
                     "episodeList" to s.episodeList.map { ep ->
                         mapOf(
                             "episode" to ep.episode,
