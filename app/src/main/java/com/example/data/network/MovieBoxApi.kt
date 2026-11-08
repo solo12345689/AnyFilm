@@ -674,8 +674,9 @@ object MovieBoxRetrofitClient {
     fun getApi(prefs: PreferencesManager): MovieBoxApi {
         val client = OkHttpClient.Builder()
             .connectionPool(okhttp3.ConnectionPool(10, 5, TimeUnit.MINUTES))
-            .connectTimeout(6, TimeUnit.SECONDS)
-            .readTimeout(8, TimeUnit.SECONDS)
+            .connectTimeout(25, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .writeTimeout(25, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .addInterceptor(CookieInterceptor(prefs))
             .addInterceptor(MovieBoxSignatureInterceptor(prefs))

@@ -459,8 +459,9 @@ fun SettingsScreen(
                     modifier = Modifier.padding(start = 6.dp, bottom = 8.dp)
                 )
 
-                // Group 2: Content & Feed Preferences (Location + Manage Categories)
+                // Group 2: Content & Feed Preferences (Location + Manage Categories + Manage Providers)
                 var showLocationDialog by remember { mutableStateOf(false) }
+                var showProviderDialog by remember { mutableStateOf(false) }
 
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -468,6 +469,54 @@ fun SettingsScreen(
                     shape = RoundedCornerShape(16.dp)
                 ) {
                     Column(modifier = Modifier.fillMaxWidth()) {
+                        // Manage Providers Row
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { showProviderDialog = true }
+                                .padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Image(
+                                    painter = painterResource(
+                                        id = if (viewModel.isAniFam) R.drawable.ic_provider_anifam else R.drawable.ic_provider_moviebox
+                                    ),
+                                    contentDescription = "Active Provider",
+                                    modifier = Modifier
+                                        .size(24.dp)
+                                        .clip(RoundedCornerShape(6.dp))
+                                )
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column {
+                                    Text(
+                                        text = "Manage Providers",
+                                        fontSize = 15.sp,
+                                        color = TextPrimary,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(
+                                        text = if (viewModel.isAniFam) "AniFam" else "MovieBox",
+                                        fontSize = 12.sp,
+                                        color = TextSecondary
+                                    )
+                                }
+                            }
+                            Icon(
+                                imageVector = Icons.Filled.ChevronRight,
+                                contentDescription = "Navigate",
+                                tint = TextSecondary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+
+                        HorizontalDivider(
+                            color = Color.White.copy(alpha = 0.06f),
+                            thickness = 1.dp,
+                            modifier = Modifier.padding(horizontal = 14.dp)
+                        )
+
                         // Location Selection Row
                         Row(
                             modifier = Modifier
@@ -667,8 +716,8 @@ fun SettingsScreen(
                                     )
                                     val appVersion = remember {
                                         try {
-                                            context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "4.2"
-                                        } catch (e: Exception) { "4.2" }
+                                            context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "4.3"
+                                        } catch (e: Exception) { "4.3" }
                                     }
                                     Text(
                                         text = if (viewModel.isCheckingUpdate) "Checking latest version..." else "Current: v$appVersion",
@@ -693,6 +742,64 @@ fun SettingsScreen(
                             }
                         }
                     }
+                }
+
+                if (showProviderDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showProviderDialog = false },
+                        title = { Text("Select Provider", color = TextPrimary, fontWeight = FontWeight.Bold) },
+                        text = {
+                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                val providers = listOf(
+                                    Triple(com.example.data.preferences.PreferencesManager.PROVIDER_MOVIEBOX, "MovieBox", R.drawable.ic_provider_moviebox),
+                                    Triple(com.example.data.preferences.PreferencesManager.PROVIDER_ANIFAM, "AniFam", R.drawable.ic_provider_anifam)
+                                )
+                                providers.forEach { prov ->
+                                    val isSelected = viewModel.activeProvider == prov.first
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(if (isSelected) CinematicRed.copy(alpha = 0.15f) else Color.White.copy(alpha = 0.04f))
+                                            .clickable {
+                                                viewModel.switchProvider(prov.first)
+                                                showProviderDialog = false
+                                            }
+                                            .padding(14.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Image(
+                                                painter = painterResource(id = prov.third),
+                                                contentDescription = prov.second,
+                                                modifier = Modifier
+                                                    .size(36.dp)
+                                                    .clip(RoundedCornerShape(8.dp))
+                                            )
+                                            Spacer(modifier = Modifier.width(14.dp))
+                                            Text(
+                                                text = prov.second,
+                                                color = TextPrimary,
+                                                fontSize = 16.sp,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
+                                        RadioButton(
+                                            selected = isSelected,
+                                            onClick = {
+                                                viewModel.switchProvider(prov.first)
+                                                showProviderDialog = false
+                                            },
+                                            colors = RadioButtonDefaults.colors(selectedColor = CinematicRed)
+                                        )
+                                    }
+                                }
+                            }
+                        },
+                        confirmButton = {},
+                        containerColor = ObsidianCard
+                    )
                 }
 
                 if (showLocationDialog) {

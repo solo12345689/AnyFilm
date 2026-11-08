@@ -45,9 +45,10 @@ data class ActiveDownload(
 class MovieViewModel(application: Application) : AndroidViewModel(application) {
     private val prefs = PreferencesManager(application)
     private val database = MovieDatabase.getDatabase(application)
-    private val repository = MovieRepository(
+    val repository = MovieRepository(
         MovieBoxRetrofitClient.getApi(prefs),
-        database.movieDao()
+        database.movieDao(),
+        prefs
     )
 
     // Developer and Sandbox / Lockout State
@@ -81,7 +82,12 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectStreamByPreference(streamList: List<com.example.data.model.StreamItem>, preference: String): com.example.data.model.StreamItem? {
         if (streamList.isEmpty()) return null
-        if (preference.equals("Auto", ignoreCase = true) || preference.equals("Highest", ignoreCase = true)) {
+        if (preference.equals("Auto", ignoreCase = true)) {
+            val autoStream = streamList.find { it.quality.equals("Auto", ignoreCase = true) }
+            if (autoStream != null) return autoStream
+            return selectHighestQualityStream(streamList)
+        }
+        if (preference.equals("Highest", ignoreCase = true)) {
             return selectHighestQualityStream(streamList)
         }
         val prefDigits = preference.filter { it.isDigit() }.toIntOrNull()
@@ -126,6 +132,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
     var seasonsList by mutableStateOf<List<Int>>(emptyList())
     var selectedSeason by mutableStateOf(1)
     var episodesList by mutableStateOf<List<Episode>>(emptyList())
+    var isLoadingEpisodes by mutableStateOf(false)
     var detailRecommendations by mutableStateOf<List<MovieSubject>>(emptyList())
     
     // Player / Streaming Resolver State
@@ -164,15 +171,36 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
     private val _searchSuggestions = MutableStateFlow<List<String>>(emptyList())
     val searchSuggestions: StateFlow<List<String>> = _searchSuggestions.asStateFlow()
 
-    private val _cloudFavorites = MutableStateFlow<List<FavoriteEntity>>(emptyList())
-    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-    val favoritesList: StateFlow<List<FavoriteEntity>> = snapshotFlow { isLoggedIn }
-        .flatMapLatest { loggedIn ->
-            if (loggedIn) _cloudFavorites else repository.favorites
-        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    private val _cloudFavoritesMovieBox = MutableStateFlow<List<FavoriteEntity>>(emptyList())
+    private val _cloudFavoritesAniFam = MutableStateFlow<List<FavoriteEntity>>(emptyList())
 
-    val historyList: StateFlow<List<HistoryEntity>> = repository.history
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val favoritesList: StateFlow<List<FavoriteEntity>> = combine(
+        snapshotFlow { isLoggedIn },
+        snapshotFlow { isAniFam },
+        _cloudFavoritesMovieBox,
+        _cloudFavoritesAniFam,
+        repository.favorites
+    ) { loggedIn, aniFam, cloudMbox, cloudAni, localFavs ->
+        if (aniFam) {
+            if (loggedIn) cloudAni
+            else localFavs.filter { it.id.startsWith("anifam_") || (it.id.all { c -> c.isDigit() } && !it.id.startsWith("moviebox_")) }
+        } else {
+            if (loggedIn) cloudMbox
+            else localFavs.filter { !it.id.startsWith("anifam_") }
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val historyList: StateFlow<List<HistoryEntity>> = combine(
+        repository.history,
+        snapshotFlow { isAniFam }
+    ) { list, aniFam ->
+        if (aniFam) {
+            list.filter { it.id.startsWith("anifam_") || (it.subjectId.all { c -> c.isDigit() } && !it.id.startsWith("moviebox_")) }
+        } else {
+            list.filter { !it.id.startsWith("anifam_") }
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // Real User Authentication State
     var isLoggedIn by mutableStateOf(false)
@@ -182,20 +210,45 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
     var authErrorMsg by mutableStateOf("")
     var isAuthLoading by mutableStateOf(false)
 
+    // Active Provider
+    var activeProvider by mutableStateOf(prefs.activeProvider)
+        private set
+
+    val isAniFam: Boolean
+        get() = activeProvider == PreferencesManager.PROVIDER_ANIFAM
+
+    private val aniFamApi: com.example.data.network.AniFamApi
+        get() = com.example.data.network.AniFamRetrofitClient.getApi(prefs)
+
+    // AniFam dynamic genres
+    var aniFamGenres by mutableStateOf<List<com.example.data.model.AniFamGenreItem>>(emptyList())
+        private set
+    var isLoadingAniFamGenres by mutableStateOf(false)
+        private set
+
     // Dynamic Categories
-    private val defaultCategories = listOf(
+    private val defaultMovieBoxCategories = listOf(
         2 to "Home",
         5 to "Series",
         8 to "Anime",
         18 to "Asian"
     )
+
+    private val defaultAniFamCategories = listOf(
+        0 to "Home"
+    )
+
+    val defaultCategories: List<Pair<Int, String>>
+        get() = if (isAniFam) defaultAniFamCategories else defaultMovieBoxCategories
     
-    private val _activeCategories = MutableStateFlow<List<Pair<Int, String>>>(defaultCategories)
+    private val _activeCategories = MutableStateFlow<List<Pair<Int, String>>>(if (prefs.isAniFam) defaultAniFamCategories else defaultMovieBoxCategories)
     val activeCategories: StateFlow<List<Pair<Int, String>>> = _activeCategories
 
     // Download Cache State (Kept in memory for instant screen opening)
     var downloadedFiles by mutableStateOf<List<java.io.File>>(emptyList())
     var activeDownloads by mutableStateOf<List<ActiveDownload>>(emptyList())
+    var inAppDownloads by mutableStateOf<List<ActiveDownload>>(emptyList())
+    private val inAppDownloadJobs = java.util.concurrent.ConcurrentHashMap<Long, kotlinx.coroutines.Job>()
     var isDownloadScanLoaded by mutableStateOf(false)
     var playingDownloadedFile by mutableStateOf<java.io.File?>(null)
 
@@ -476,15 +529,20 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
     fun scanDownloadedFiles() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val baseDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES)
-                val primaryDir = java.io.File(baseDir, "AnyFilm")
-                val legacyDir = java.io.File(baseDir, "Genga World")
-                val dir = if (primaryDir.exists()) primaryDir else if (legacyDir.exists()) legacyDir else primaryDir
-                val files = if (dir.exists() && dir.isDirectory) {
-                    dir.listFiles()?.filter { it.extension.equals("mp4", ignoreCase = true) }?.sortedBy { it.name } ?: emptyList()
-                } else {
-                    emptyList()
-                }
+                val app = getApplication<android.app.Application>()
+                val candidateDirs = listOfNotNull(
+                    java.io.File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES), "AnyFilm"),
+                    app.getExternalFilesDir(android.os.Environment.DIRECTORY_MOVIES)?.let { java.io.File(it, "AnyFilm") },
+                    java.io.File(app.filesDir, "AnyFilm"),
+                    java.io.File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES), "Genga World")
+                )
+                val files = candidateDirs
+                    .filter { it.exists() && it.isDirectory }
+                    .flatMap { it.listFiles()?.toList() ?: emptyList() }
+                    .filter { it.extension.equals("mp4", ignoreCase = true) }
+                    .distinctBy { it.name }
+                    .sortedBy { it.name }
+
                 withContext(Dispatchers.Main) {
                     downloadedFiles = files
                     isDownloadScanLoaded = true
@@ -497,6 +555,58 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
     
+    fun switchProvider(provider: String) {
+        if (activeProvider == provider) return
+        prefs.activeProvider = provider
+        activeProvider = provider
+
+        // Clear all subject, episode, player and search states completely to avoid provider bleeding
+        selectedSubject = null
+        originalSubjectDetail = null
+        episodesList = emptyList()
+        seasonsList = emptyList()
+        selectedSeason = 1
+        isLoadingEpisodes = false
+        currentEpisode = null
+        playInfo = null
+        isPlaying = false
+        isPlaybackLoading = false
+        searchQuery = ""
+        _searchResults.value = emptyList()
+
+        repository.clearCaches()
+        categoryCache.clear()
+        categorySectionsCache.clear()
+        _categorySections.value = emptyList()
+        selectedCategoryTab = if (provider == PreferencesManager.PROVIDER_ANIFAM) 0 else 2
+        loadActiveCategories()
+        loadDashboardContent()
+        loadSearchSuggestions()
+        checkUserSession()
+        refreshWatchlist()
+    }
+
+    fun loadAniFamGenres() {
+        if (aniFamGenres.isEmpty()) {
+            aniFamGenres = repository.defaultAniFamGenres
+        }
+        viewModelScope.launch {
+            isLoadingAniFamGenres = true
+            try {
+                val list = repository.getAniFamGenres()
+                if (list.isNotEmpty()) {
+                    aniFamGenres = list
+                }
+            } catch (e: Exception) {
+                if (aniFamGenres.isEmpty()) {
+                    aniFamGenres = repository.defaultAniFamGenres
+                }
+            } finally {
+                isLoadingAniFamGenres = false
+            }
+        }
+    }
+
     fun loadActiveCategories() {
         val saved = prefs.activeCategories
         if (saved != null) {
@@ -505,7 +615,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                     val parts = it.split(":")
                     if (parts.size == 2) {
                         val id = parts[0].toInt()
-                        val name = if (id == 2) "Home" else parts[1]
+                        val name = if (id == 2 || id == 0) "Home" else parts[1]
                         id to name
                     } else null
                 }
@@ -571,10 +681,26 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
     fun checkUserSession() {
         viewModelScope.launch {
             try {
-                val api = MovieBoxRetrofitClient.getApi(prefs)
-                val response = api.getUserInfo()
-                isLoggedIn = response.logged_in
-                currentUserProfile = response.user
+                if (isAniFam) {
+                    val token = prefs.anifamAuthToken
+                    val info = prefs.anifamUserInfoJson
+                    if (!token.isNullOrEmpty() && !info.isNullOrEmpty()) {
+                        try {
+                            currentUserProfile = com.squareup.moshi.Moshi.Builder().build().adapter(com.example.data.model.UserProfile::class.java).fromJson(info)
+                            isLoggedIn = true
+                        } catch (_: Exception) {
+                            isLoggedIn = false
+                        }
+                    } else {
+                        isLoggedIn = false
+                        currentUserProfile = null
+                    }
+                } else {
+                    val api = MovieBoxRetrofitClient.getApi(prefs)
+                    val response = api.getUserInfo()
+                    isLoggedIn = response.logged_in
+                    currentUserProfile = response.user
+                }
             } catch (e: Exception) {
                 // Ignore session check failure
             }
@@ -609,18 +735,44 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
             isAuthLoading = true
             authErrorMsg = ""
             try {
-                val api = MovieBoxRetrofitClient.getApi(prefs)
-                val response = api.login(com.example.data.model.LoginApiRequest(account = email, password = password))
-                if (response.status == "success") {
-                    isLoggedIn = true
-                    currentUserProfile = response.user
-                    authErrorMsg = ""
-                    syncLocalFavoritesToCloud(api)
-                    loadDashboardContent()
-                    onSuccess()
+                if (isAniFam) {
+                    val aniApi = com.example.data.network.AniFamRetrofitClient.getApi(prefs)
+                    val devName = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}"
+                    val response = aniApi.login(com.example.data.model.AniFamLoginRequest(login = email, password = password, device_name = devName))
+                    if (!response.token.isNullOrEmpty()) {
+                        prefs.anifamAuthToken = response.token
+                        val u = response.user
+                        val profile = com.example.data.model.UserProfile(
+                            username = u?.username ?: email,
+                            nickname = u?.name ?: email,
+                            avatar = u?.fullAvatarUrl ?: "",
+                            email = u?.email ?: email,
+                            userId = u?.id?.toString() ?: ""
+                        )
+                        prefs.anifamUserInfoJson = com.squareup.moshi.Moshi.Builder().build().adapter(com.example.data.model.UserProfile::class.java).toJson(profile)
+                        currentUserProfile = profile
+                        isLoggedIn = true
+                        authErrorMsg = ""
+                        loadDashboardContent()
+                        onSuccess()
+                    } else {
+                        authErrorMsg = "Login failed"
+                        onError(authErrorMsg)
+                    }
                 } else {
-                    authErrorMsg = response.message.ifEmpty { "Login failed" }
-                    onError(authErrorMsg)
+                    val api = MovieBoxRetrofitClient.getApi(prefs)
+                    val response = api.login(com.example.data.model.LoginApiRequest(account = email, password = password))
+                    if (response.status == "success") {
+                        isLoggedIn = true
+                        currentUserProfile = response.user
+                        authErrorMsg = ""
+                        syncLocalFavoritesToCloud(api)
+                        loadDashboardContent()
+                        onSuccess()
+                    } else {
+                        authErrorMsg = response.message.ifEmpty { "Login failed" }
+                        onError(authErrorMsg)
+                    }
                 }
             } catch (e: Exception) {
                 authErrorMsg = parseErrorMessage(e)
@@ -631,23 +783,65 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun registerAccount(email: String, password: String, otp: String, onSuccess: () -> Unit, onError: (String) -> Unit) {
+    fun registerAccount(
+        email: String,
+        password: String,
+        otp: String,
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit,
+        displayName: String = ""
+    ) {
         viewModelScope.launch {
             isAuthLoading = true
             authErrorMsg = ""
             try {
-                val api = MovieBoxRetrofitClient.getApi(prefs)
-                val response = api.register(com.example.data.model.RegisterApiRequest(account = email, password = password, otp = otp))
-                if (response.status == "success") {
-                    isLoggedIn = true
-                    currentUserProfile = response.user
-                    authErrorMsg = ""
-                    syncLocalFavoritesToCloud(api)
-                    loadDashboardContent()
-                    onSuccess()
+                if (isAniFam) {
+                    val aniApi = com.example.data.network.AniFamRetrofitClient.getApi(prefs)
+                    val name = if (displayName.isNotBlank()) displayName else email.substringBefore("@").replaceFirstChar { it.uppercase() }
+                    val devName = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}"
+                    val response = aniApi.register(
+                        com.example.data.model.AniFamRegisterRequest(
+                            name = name,
+                            email = email,
+                            password = password,
+                            password_confirmation = password,
+                            device_name = devName
+                        )
+                    )
+                    if (!response.token.isNullOrEmpty()) {
+                        prefs.anifamAuthToken = response.token
+                        val u = response.user
+                        val profile = com.example.data.model.UserProfile(
+                            username = u?.username ?: email,
+                            nickname = u?.name ?: name,
+                            avatar = u?.fullAvatarUrl ?: "",
+                            email = u?.email ?: email,
+                            userId = u?.id?.toString() ?: ""
+                        )
+                        prefs.anifamUserInfoJson = com.squareup.moshi.Moshi.Builder().build().adapter(com.example.data.model.UserProfile::class.java).toJson(profile)
+                        currentUserProfile = profile
+                        isLoggedIn = true
+                        authErrorMsg = ""
+                        loadDashboardContent()
+                        onSuccess()
+                    } else {
+                        authErrorMsg = "Registration failed"
+                        onError(authErrorMsg)
+                    }
                 } else {
-                    authErrorMsg = response.message.ifEmpty { "Registration failed" }
-                    onError(authErrorMsg)
+                    val api = MovieBoxRetrofitClient.getApi(prefs)
+                    val response = api.register(com.example.data.model.RegisterApiRequest(account = email, password = password, otp = otp))
+                    if (response.status == "success") {
+                        isLoggedIn = true
+                        currentUserProfile = response.user
+                        authErrorMsg = ""
+                        syncLocalFavoritesToCloud(api)
+                        loadDashboardContent()
+                        onSuccess()
+                    } else {
+                        authErrorMsg = response.message.ifEmpty { "Registration failed" }
+                        onError(authErrorMsg)
+                    }
                 }
             } catch (e: Exception) {
                 authErrorMsg = parseErrorMessage(e)
@@ -662,13 +856,27 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             isAuthLoading = true
             try {
-                val api = MovieBoxRetrofitClient.getApi(prefs)
-                val response = api.modifyProfile(mapOf("nickname" to nickname, "avatar" to avatar))
-                if (response.code == 0 || response.message == "ok") {
-                    checkUserSession()
+                if (isAniFam) {
+                    val updatedUser = aniFamApi.updateProfile(com.example.data.model.AniFamProfileUpdateRequest(name = nickname))
+                    val profile = com.example.data.model.UserProfile(
+                        userId = updatedUser.id.toString(),
+                        username = updatedUser.name ?: nickname,
+                        nickname = updatedUser.name ?: nickname,
+                        email = updatedUser.email ?: "",
+                        avatar = updatedUser.fullAvatarUrl
+                    )
+                    prefs.anifamUserInfoJson = com.squareup.moshi.Moshi.Builder().build().adapter(com.example.data.model.UserProfile::class.java).toJson(profile)
+                    currentUserProfile = profile
                     onSuccess()
                 } else {
-                    onError(response.message.ifEmpty { "Failed to update profile" })
+                    val api = MovieBoxRetrofitClient.getApi(prefs)
+                    val response = api.modifyProfile(mapOf("nickname" to nickname, "avatar" to avatar))
+                    if (response.code == 0 || response.message == "ok") {
+                        checkUserSession()
+                        onSuccess()
+                    } else {
+                        onError(response.message.ifEmpty { "Failed to update profile" })
+                    }
                 }
             } catch (e: Exception) {
                 onError(parseErrorMessage(e))
@@ -682,6 +890,30 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             isAuthLoading = true
             try {
+                if (isAniFam) {
+                    val requestBody = okhttp3.RequestBody.create("image/jpeg".toMediaTypeOrNull(), imageBytes)
+                    val part = okhttp3.MultipartBody.Part.createFormData("avatar", "avatar.jpg", requestBody)
+                    val updatedUser = aniFamApi.uploadAvatar(part)
+                    if (nickname.isNotBlank() && nickname != currentUserProfile?.nickname) {
+                        try {
+                            aniFamApi.updateProfile(com.example.data.model.AniFamProfileUpdateRequest(name = nickname))
+                        } catch (e: Exception) {
+                            android.util.Log.w("MovieViewModel", "AniFam updateProfile name failed: ${e.message}")
+                        }
+                    }
+                    val profile = com.example.data.model.UserProfile(
+                        userId = updatedUser.id?.toString() ?: currentUserProfile?.userId ?: "",
+                        username = updatedUser.username ?: updatedUser.name ?: nickname,
+                        nickname = updatedUser.name ?: nickname,
+                        email = updatedUser.email ?: currentUserProfile?.email ?: "",
+                        avatar = updatedUser.fullAvatarUrl
+                    )
+                    prefs.anifamUserInfoJson = com.squareup.moshi.Moshi.Builder().build().adapter(com.example.data.model.UserProfile::class.java).toJson(profile)
+                    currentUserProfile = profile
+                    onSuccess()
+                    return@launch
+                }
+
                 val api = MovieBoxRetrofitClient.getApi(prefs)
 
                 // 1. Fetch STS token
@@ -865,8 +1097,13 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
     fun logoutUser(onSuccess: () -> Unit = {}) {
         viewModelScope.launch {
             try {
-                val api = MovieBoxRetrofitClient.getApi(prefs)
-                api.logout()
+                if (isAniFam) {
+                    prefs.anifamAuthToken = null
+                    prefs.anifamUserInfoJson = null
+                } else {
+                    val api = MovieBoxRetrofitClient.getApi(prefs)
+                    api.logout()
+                }
             } catch (e: Exception) {
                 // Ignore
             } finally {
@@ -972,7 +1209,19 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadDashboardContent() {
-        isDashboardLoading = true
+        val cachedSec = repository.getCachedCategorySections(selectedCategoryTab)
+        val cachedCat = repository.getCachedCategoryList(selectedCategoryTab)
+        val cachedTrending = repository.getCachedTrending()
+
+        if (cachedSec.isNotEmpty() || cachedCat.isNotEmpty()) {
+            _categorySections.value = cachedSec
+            _categoryMovies.value = cachedCat
+            _trendingMovies.value = cachedTrending
+            isDashboardLoading = false
+        } else {
+            isDashboardLoading = true
+        }
+
         viewModelScope.launch {
             try {
                 // Fetch trending and categories in parallel using coroutineScope
@@ -983,11 +1232,15 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                     Triple(trendingDeferred.await(), categoriesDeferred.await(), sectionsDeferred.await())
                 }
 
-                _trendingMovies.value = trending
-                categoryCache[selectedCategoryTab] = categories
-                _categoryMovies.value = categories
-                categorySectionsCache[selectedCategoryTab] = sections
-                _categorySections.value = sections
+                if (trending.isNotEmpty()) _trendingMovies.value = trending
+                if (categories.isNotEmpty()) {
+                    categoryCache[selectedCategoryTab] = categories
+                    _categoryMovies.value = categories
+                }
+                if (sections.isNotEmpty()) {
+                    categorySectionsCache[selectedCategoryTab] = sections
+                    _categorySections.value = sections
+                }
 
                 // Pre-warm poster images for all top items immediately during splash
                 val app = getApplication<Application>()
@@ -1028,14 +1281,16 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
     fun loadCategoryList(categoryId: Int) {
         selectedCategoryTab = categoryId
         
-        // Immediately show cached data if available for instant switching
-        val cached = categoryCache[categoryId]
-        if (cached != null && cached.isNotEmpty()) {
-            _categoryMovies.value = cached
+        // Immediately show cached data if available (RAM or Disk) for instant 0ms switching
+        val cachedCat = repository.getCachedCategoryList(categoryId)
+        val cachedSec = repository.getCachedCategorySections(categoryId)
+        if (cachedCat.isNotEmpty()) {
+            categoryCache[categoryId] = cachedCat
+            _categoryMovies.value = cachedCat
         }
-        val cachedSections = categorySectionsCache[categoryId]
-        if (cachedSections != null && cachedSections.isNotEmpty()) {
-            _categorySections.value = cachedSections
+        if (cachedSec.isNotEmpty()) {
+            categorySectionsCache[categoryId] = cachedSec
+            _categorySections.value = cachedSec
         }
 
         viewModelScope.launch {
@@ -1045,10 +1300,14 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                     val secDeferred = async(Dispatchers.IO) { repository.getCategorySections(categoryId, 1, 50) }
                     Pair(catDeferred.await(), secDeferred.await())
                 }
-                categoryCache[categoryId] = categories
-                _categoryMovies.value = categories
-                categorySectionsCache[categoryId] = sections
-                _categorySections.value = sections
+                if (categories.isNotEmpty()) {
+                    categoryCache[categoryId] = categories
+                    _categoryMovies.value = categories
+                }
+                if (sections.isNotEmpty()) {
+                    categorySectionsCache[categoryId] = sections
+                    _categorySections.value = sections
+                }
                 // Pre-fetch details and warm up posters in the background
                 val app = getApplication<Application>()
                 val imgLoader = coil.Coil.imageLoader(app)
@@ -1081,25 +1340,36 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
     var canSearchLoadMore by mutableStateOf(true)
         private set
 
-    fun searchMovies(query: String) {
+    private var searchJob: kotlinx.coroutines.Job? = null
+
+    fun searchMovies(query: String, immediate: Boolean = false) {
         searchQuery = query
         searchPage = 1
         canSearchLoadMore = true
+        searchJob?.cancel()
+
         if (query.isBlank()) {
             _searchResults.value = emptyList()
+            isSearching = false
             loadSearchSuggestions(null)
             return
         }
-        loadSearchSuggestions(query)
-        isSearching = true
-        viewModelScope.launch {
-            val results = repository.search(query, 1)
-            _searchResults.value = results
-            isSearching = false
-            canSearchLoadMore = results.size >= 10
-            // Pre-fetch search results in the background
-            results.take(15).forEach { item ->
-                launch { repository.getDetail(item.id) }
+
+        searchJob = viewModelScope.launch {
+            if (!immediate) {
+                kotlinx.coroutines.delay(350)
+            }
+            isSearching = true
+            try {
+                loadSearchSuggestions(query)
+                val results = repository.search(query, 1)
+                _searchResults.value = results
+                canSearchLoadMore = results.size >= 10
+            } catch (_: kotlinx.coroutines.CancellationException) {
+            } catch (e: Exception) {
+                _searchResults.value = emptyList()
+            } finally {
+                isSearching = false
             }
         }
     }
@@ -1144,7 +1414,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
         } ?: detail.resourceDetectors.firstOrNull()
         selectedResource = autoMatch
 
-        if (autoMatch != null && autoMatch.resourceId.startsWith("dub_")) {
+        if (!isAniFam && autoMatch != null && autoMatch.resourceId.startsWith("dub_")) {
             val dubSubjectId = autoMatch.resourceId.substringAfter("dub_")
             val dubDetail = repository.getCachedDetail(dubSubjectId)
             if (dubDetail != null) {
@@ -1178,6 +1448,45 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
         currentEpisode = null
         playInfo = null
         detailRecommendations = emptyList()
+        episodesList = emptyList()
+        seasonsList = emptyList()
+        selectedSeason = 1
+        isLoadingEpisodes = subject.isTvShow
+
+        if (subject.id.startsWith("tmdb_") && !isAniFam) {
+            selectedSubject = subject
+            originalSubjectDetail = subject
+            viewModelScope.launch {
+                try {
+                    val searchResults = repository.search(subject.name)
+                    val matched = searchResults.firstOrNull { 
+                        it.name.equals(subject.name, ignoreCase = true)
+                    } ?: searchResults.firstOrNull {
+                        it.name.contains(subject.name, ignoreCase = true) || subject.name.contains(it.name, ignoreCase = true)
+                    } ?: searchResults.firstOrNull()
+
+                    if (matched != null) {
+                        val fullDetail = repository.getDetail(matched.id)
+                        if (fullDetail != null) {
+                            setupSubjectWithDetail(fullDetail)
+                            selectedSubject = fullDetail
+                            originalSubjectDetail = fullDetail
+                            if (fullDetail.isTvShow) {
+                                episodesList = repository.getEpisodes(fullDetail.id, selectedSeason)
+                            }
+                            try {
+                                detailRecommendations = repository.getDetailRec(fullDetail.id)
+                            } catch (_: Exception) {}
+                        }
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("MovieViewModel", "Error resolving TMDB subject to MovieBox", e)
+                } finally {
+                    isLoadingEpisodes = false
+                }
+            }
+            return
+        }
 
         // Check cache for instant load
         val cachedDetail = repository.getCachedDetail(subject.id)
@@ -1222,9 +1531,12 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                 val fullDetail = repository.getDetail(subject.id)
                 if (fullDetail != null) {
                     setupSubjectWithDetail(fullDetail)
+                    if (isAniFam) {
+                        detailRecommendations = repository.getDetailRec(subject.id)
+                    }
                     
                     val currentAutoMatch = selectedResource
-                    if (currentAutoMatch != null && currentAutoMatch.resourceId.startsWith("dub_")) {
+                    if (!isAniFam && currentAutoMatch != null && currentAutoMatch.resourceId.startsWith("dub_")) {
                         val dubSubjectId = currentAutoMatch.resourceId.substringAfter("dub_")
                         val dubDetail = repository.getDetail(dubSubjectId)
                         if (dubDetail != null) {
@@ -1236,23 +1548,34 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                             }
                             episodesList = repository.getEpisodes(dubSubjectId, selectedSeason)
                         }
+                    } else if (fullDetail.isTvShow) {
+                        episodesList = repository.getEpisodes(fullDetail.id, selectedSeason)
                     }
                 }
             } catch (e: Exception) {
                 android.util.Log.e("MovieViewModel", "Failed to fetch full subject detail", e)
+            } finally {
+                isLoadingEpisodes = false
             }
         }
     }
 
     fun loadEpisodesForSeason(season: Int) {
         selectedSeason = season
-        val activeSubjectId = if (selectedResource?.resourceId?.startsWith("dub_") == true) {
+        val activeSubjectId = if (!isAniFam && selectedResource?.resourceId?.startsWith("dub_") == true) {
             selectedResource!!.resourceId.substringAfter("dub_")
         } else {
             originalSubjectDetail?.id ?: selectedSubject?.id ?: return
         }
+        isLoadingEpisodes = true
         viewModelScope.launch {
-            episodesList = repository.getEpisodes(activeSubjectId, season)
+            try {
+                episodesList = repository.getEpisodes(activeSubjectId, season)
+            } catch (e: Exception) {
+                android.util.Log.e("MovieViewModel", "Failed to load episodes for season $season", e)
+            } finally {
+                isLoadingEpisodes = false
+            }
         }
     }
 
@@ -1292,6 +1615,298 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun safeToast(context: android.content.Context, msg: String, duration: Int = Toast.LENGTH_SHORT) {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            try {
+                Toast.makeText(context, msg, duration).show()
+            } catch (_: Throwable) {}
+        }
+    }
+
+    fun getDownloadStorageDir(context: android.content.Context): java.io.File {
+        // 1. Try public external Movies/AnyFilm if writable (for older Android or when permitted)
+        try {
+            val pubBase = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES)
+            val pubDir = java.io.File(pubBase, "AnyFilm")
+            if (pubDir.exists() || pubDir.mkdirs()) {
+                val test = java.io.File(pubDir, ".test_${System.currentTimeMillis()}")
+                if (test.createNewFile()) {
+                    test.delete()
+                    return pubDir
+                }
+            }
+        } catch (_: Throwable) {}
+
+        // 2. App-specific external Movies/AnyFilm (Always 100% permitted without permissions on Android 10-15)
+        try {
+            val appExt = context.getExternalFilesDir(android.os.Environment.DIRECTORY_MOVIES)
+            if (appExt != null) {
+                val appDir = java.io.File(appExt, "AnyFilm")
+                if (appDir.exists() || appDir.mkdirs()) {
+                    return appDir
+                }
+            }
+        } catch (_: Throwable) {}
+
+        // 3. Fallback to app internal files dir
+        val internalDir = java.io.File(context.filesDir, "AnyFilm")
+        if (!internalDir.exists()) internalDir.mkdirs()
+        return internalDir
+    }
+
+    fun downloadSingleEpisode(
+        context: android.content.Context,
+        subject: MovieSubject,
+        episode: com.example.data.model.Episode
+    ) {
+        safeToast(context, "Download started...", Toast.LENGTH_SHORT)
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val resId = selectedResource?.resourceId
+                val downloadResId = when {
+                    selectedResource?.resourceId?.contains("dub", ignoreCase = true) == true -> "dub"
+                    else -> "sub"
+                }
+                val playInfoResult = repository.getPlayInfo(
+                    subject.id,
+                    episode.seasonNumber,
+                    episode.episodeNumber,
+                    quality = defaultStreamQuality,
+                    resourceId = if (isAniFam) downloadResId else resId
+                )
+                val stream = selectStreamByPreference(playInfoResult.streamList, defaultStreamQuality)
+                    ?: selectHighestQualityStream(playInfoResult.streamList)
+                    ?: playInfoResult.streamList.firstOrNull()
+
+                val streamUrl = stream?.url ?: ""
+                if (streamUrl.isEmpty()) {
+                    safeToast(context, "No stream found for download")
+                    return@launch
+                }
+
+                val safeTitle = "${subject.name} S${episode.seasonNumber}E${episode.episodeNumber.toString().padStart(2, '0')}"
+                val cookies = stream?.cookie ?: ""
+                startDownload(context, subject, safeTitle, streamUrl, cookies)
+            } catch (e: Exception) {
+                safeToast(context, "Download failed: ${e.message}")
+            }
+        }
+    }
+
+    fun startDownload(
+        context: android.content.Context,
+        subject: MovieSubject,
+        safeTitle: String,
+        streamUrl: String,
+        cookies: String = ""
+    ) {
+        val cleanTitle = safeTitle.replace(Regex("[^a-zA-Z0-9.-]"), "_")
+        if (streamUrl.contains(".m3u8") || isAniFam) {
+            startHlsDownload(context, subject, cleanTitle, streamUrl, cookies)
+        } else {
+            com.example.ui.screens.downloadVideo(context, streamUrl, cleanTitle, subject.poster, showToast = false)
+        }
+    }
+
+    fun startHlsDownload(
+        context: android.content.Context,
+        subject: MovieSubject,
+        safeTitle: String,
+        m3u8Url: String,
+        cookies: String = ""
+    ) {
+        val downloadId = System.currentTimeMillis()
+        val dir = getDownloadStorageDir(context)
+
+        val targetFile = java.io.File(dir, "$safeTitle.mp4")
+        val partFile = java.io.File(dir, "$safeTitle.mp4.part")
+
+        if (subject.poster.isNotEmpty()) {
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    val safeShowName = Regex("(.*?)(_S\\d+E\\d+.*|$)").find(safeTitle)?.groupValues?.get(1)?.trim() ?: safeTitle
+                    val safeShowPrefix = safeShowName.replace(Regex("[^a-zA-Z0-9.-]"), "_")
+
+                    val titlePoster = java.io.File(dir, "$safeTitle.jpg")
+                    val showPoster = if (safeShowPrefix.isNotEmpty() && safeShowPrefix != safeTitle) java.io.File(dir, "$safeShowPrefix.jpg") else null
+
+                    val pubDir = java.io.File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES), "AnyFilm")
+                    val pubTitlePoster = if (pubDir != dir && pubDir.exists()) java.io.File(pubDir, "$safeTitle.jpg") else null
+                    val pubShowPoster = if (pubDir != dir && pubDir.exists() && safeShowPrefix.isNotEmpty() && safeShowPrefix != safeTitle) java.io.File(pubDir, "$safeShowPrefix.jpg") else null
+
+                    val posterReq = okhttp3.Request.Builder()
+                        .url(subject.poster)
+                        .header("User-Agent", "okhttp/4.12.0")
+                        .header("accept", "image/webp,image/apng,image/*,*/*;q=0.8")
+                        .build()
+
+                    val posterClient = okhttp3.OkHttpClient.Builder()
+                        .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+                        .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                        .followRedirects(true)
+                        .build()
+
+                    posterClient.newCall(posterReq).execute().use { resp ->
+                        if (resp.isSuccessful) {
+                            val bytes = resp.body?.bytes()
+                            if (bytes != null && bytes.isNotEmpty()) {
+                                if (!titlePoster.exists()) titlePoster.writeBytes(bytes)
+                                if (showPoster != null && !showPoster.exists()) showPoster.writeBytes(bytes)
+                                if (pubTitlePoster != null && !pubTitlePoster.exists()) {
+                                    try { pubTitlePoster.writeBytes(bytes) } catch (_: Throwable) {}
+                                }
+                                if (pubShowPoster != null && !pubShowPoster.exists()) {
+                                    try { pubShowPoster.writeBytes(bytes) } catch (_: Throwable) {}
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("MovieViewModel", "Failed to download poster for $safeTitle", e)
+                }
+            }
+        }
+
+        val job = viewModelScope.launch(Dispatchers.IO) {
+            val currentJob = coroutineContext[kotlinx.coroutines.Job]
+            val client = okhttp3.OkHttpClient.Builder()
+                .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(25, java.util.concurrent.TimeUnit.SECONDS)
+                .build()
+
+            val headersBuilder = okhttp3.Headers.Builder()
+                .add("User-Agent", "okhttp/4.12.0")
+                .add("Referer", "https://zokoanime.video/")
+            if (cookies.isNotEmpty()) {
+                headersBuilder.add("Cookie", cookies)
+            }
+            val headers = headersBuilder.build()
+
+            try {
+                val activeItem = ActiveDownload(
+                    id = downloadId,
+                    title = safeTitle,
+                    progress = 0,
+                    downloadedBytes = 0L,
+                    totalBytes = 80_000_000L,
+                    status = android.app.DownloadManager.STATUS_RUNNING,
+                    reason = 0,
+                    url = m3u8Url,
+                    posterUrl = subject.poster
+                )
+                withContext(Dispatchers.Main) {
+                    inAppDownloads = inAppDownloads + activeItem
+                }
+
+                // 1. Fetch playlist
+                val m3u8Req = okhttp3.Request.Builder().url(m3u8Url).headers(headers).build()
+                val m3u8Content = client.newCall(m3u8Req).execute().use { resp ->
+                    if (!resp.isSuccessful) throw Exception("HTTP ${resp.code} fetching playlist")
+                    resp.body?.string() ?: throw Exception("Empty playlist")
+                }
+
+                var mediaUrl = m3u8Url
+                var mediaContent = m3u8Content
+                if (m3u8Content.contains("#EXT-X-STREAM-INF")) {
+                    val lines = m3u8Content.lines()
+                    val variantUri = lines.firstOrNull { it.trim().isNotEmpty() && !it.startsWith("#") }
+                    if (variantUri != null) {
+                        val base = m3u8Url.substringBeforeLast('/') + "/"
+                        mediaUrl = if (variantUri.startsWith("http")) variantUri else java.net.URI(base).resolve(variantUri.trim()).toString()
+                        val mediaReq = okhttp3.Request.Builder().url(mediaUrl).headers(headers).build()
+                        mediaContent = client.newCall(mediaReq).execute().use { resp ->
+                            resp.body?.string() ?: throw Exception("Empty media playlist")
+                        }
+                    }
+                }
+
+                val baseMedia = mediaUrl.substringBeforeLast('/') + "/"
+                val segments = mediaContent.lines()
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() && !it.startsWith("#") }
+                    .map { uri ->
+                        if (uri.startsWith("http")) uri else java.net.URI(baseMedia).resolve(uri).toString()
+                    }
+
+                if (segments.isEmpty()) {
+                    throw Exception("No video segments found in stream")
+                }
+
+                val totalSegments = segments.size
+                if (partFile.exists()) partFile.delete()
+                partFile.createNewFile()
+
+                val outputStream = java.io.FileOutputStream(partFile, true)
+                outputStream.use { out ->
+                    var downloadedBytes = 0L
+                    for ((index, segUrl) in segments.withIndex()) {
+                        if (currentJob?.isActive != true) break
+
+                        var segBytes: ByteArray? = null
+                        var attempts = 0
+                        while (attempts < 3 && segBytes == null && currentJob?.isActive == true) {
+                            attempts++
+                            try {
+                                val segReq = okhttp3.Request.Builder().url(segUrl).headers(headers).build()
+                                client.newCall(segReq).execute().use { resp ->
+                                    if (resp.isSuccessful) {
+                                        segBytes = resp.body?.bytes()
+                                    }
+                                }
+                            } catch (_: Exception) {
+                                kotlinx.coroutines.delay(1000)
+                            }
+                        }
+
+                        if (segBytes != null) {
+                            out.write(segBytes)
+                            downloadedBytes += segBytes!!.size
+                        }
+
+                        val progressPercent = (((index + 1) * 100) / totalSegments).coerceIn(0, 99)
+                        val estTotal = if (index > 0) (downloadedBytes / (index + 1)) * totalSegments else downloadedBytes * totalSegments
+
+                        withContext(Dispatchers.Main) {
+                            inAppDownloads = inAppDownloads.map {
+                                if (it.id == downloadId) it.copy(
+                                    progress = progressPercent,
+                                    downloadedBytes = downloadedBytes,
+                                    totalBytes = estTotal
+                                ) else it
+                            }
+                        }
+                    }
+                }
+
+                if (currentJob?.isActive == true && partFile.exists() && partFile.length() > 0) {
+                    if (targetFile.exists()) targetFile.delete()
+                    partFile.renameTo(targetFile)
+                    withContext(Dispatchers.Main) {
+                        inAppDownloads = inAppDownloads.filter { it.id != downloadId }
+                        scanDownloadedFiles()
+                        safeToast(context, "Download complete: $safeTitle")
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("MovieViewModel", "HLS download failed for $safeTitle", e)
+                if (partFile.exists()) partFile.delete()
+                withContext(Dispatchers.Main) {
+                    inAppDownloads = inAppDownloads.filter { it.id != downloadId }
+                    safeToast(context, "Download failed: ${e.message}")
+                }
+            } finally {
+                inAppDownloadJobs.remove(downloadId)
+            }
+        }
+        inAppDownloadJobs[downloadId] = job
+    }
+
+    fun cancelInAppDownload(id: Long) {
+        inAppDownloadJobs[id]?.cancel()
+        inAppDownloadJobs.remove(id)
+        inAppDownloads = inAppDownloads.filter { it.id != id }
+    }
+
     fun downloadEpisodesBatch(
         context: android.content.Context,
         episodes: List<com.example.data.model.Episode>,
@@ -1301,9 +1916,13 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
         val subject = selectedSubject ?: return
         if (episodes.isEmpty()) return
 
-        Toast.makeText(context, "Download started...", Toast.LENGTH_SHORT).show()
+        safeToast(context, "Download started...", Toast.LENGTH_SHORT)
         viewModelScope.launch(Dispatchers.IO) {
             val resId = selectedResource?.resourceId
+            val downloadResId = when {
+                selectedResource?.resourceId?.contains("dub", ignoreCase = true) == true -> "dub"
+                else -> "sub"
+            }
             var queuedCount = 0
             for (ep in episodes) {
                 try {
@@ -1312,7 +1931,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                         ep.seasonNumber,
                         ep.episodeNumber,
                         quality = targetQuality ?: "1080p",
-                        resourceId = resId
+                        resourceId = if (isAniFam) downloadResId else resId
                     )
                     val stream = (if (targetQuality != null) selectStreamByPreference(playInfoResult.streamList, targetQuality) else null)
                         ?: selectHighestQualityStream(playInfoResult.streamList)
@@ -1320,9 +1939,8 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                     val streamUrl = stream?.url ?: ""
                     if (streamUrl.isNotEmpty() && !streamUrl.contains("b164fbfb4347792950bdfbfb563d39d9.mp4")) {
                         val safeTitle = "${subject.name} S${ep.seasonNumber}E${ep.episodeNumber.toString().padStart(2, '0')}"
-                        withContext(Dispatchers.Main) {
-                            com.example.ui.screens.downloadVideo(context, streamUrl, safeTitle, subject.poster, showToast = false)
-                        }
+                        val cookies = stream?.cookie ?: ""
+                        startDownload(context, subject, safeTitle, streamUrl, cookies)
                         queuedCount++
                         withContext(Dispatchers.Main) {
                             onProgressUpdate?.invoke(queuedCount, episodes.size)
@@ -1337,6 +1955,34 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectMovieDirect() {
         val subject = selectedSubject ?: return
+        if (subject.id.startsWith("tmdb_") && !isAniFam) {
+            isPlaybackLoading = true
+            viewModelScope.launch {
+                try {
+                    val searchResults = repository.search(subject.name)
+                    val matched = searchResults.firstOrNull { 
+                        it.name.equals(subject.name, ignoreCase = true)
+                    } ?: searchResults.firstOrNull {
+                        it.name.contains(subject.name, ignoreCase = true) || subject.name.contains(it.name, ignoreCase = true)
+                    } ?: searchResults.firstOrNull()
+
+                    if (matched != null) {
+                        val fullDetail = repository.getDetail(matched.id)
+                        if (fullDetail != null) {
+                            setupSubjectWithDetail(fullDetail)
+                            selectedSubject = fullDetail
+                            selectMovieDirect()
+                            return@launch
+                        }
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("MovieViewModel", "Failed to resolve tmdb for direct play", e)
+                } finally {
+                    isPlaybackLoading = false
+                }
+            }
+            return
+        }
         isPlaybackLoading = true
         viewModelScope.launch {
             try {
@@ -1375,7 +2021,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
         isPlaybackLoading = true
         viewModelScope.launch {
             try {
-                if (resource.resourceId.startsWith("dub_")) {
+                if (!isAniFam && resource.resourceId.startsWith("dub_")) {
                     val dubSubjectId = resource.resourceId.substringAfter("dub_")
                     val dubDetail = repository.getDetail(dubSubjectId)
                     if (dubDetail != null) {
@@ -1419,32 +2065,87 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // Toggle Favorite operation directly via cloud (no local cache)
+    // Toggle Favorite operation directly via cloud or local cache per provider
     fun toggleFavorite(subject: MovieSubject) {
         viewModelScope.launch {
-            if (isLoggedIn) {
-                val currentList = _cloudFavorites.value
-                val isFav = currentList.any { it.id == subject.id }
-                val nextState = !isFav
-                if (isFav) {
-                    _cloudFavorites.value = currentList.filter { it.id != subject.id }
-                } else {
-                    _cloudFavorites.value = listOf(
-                        FavoriteEntity(subject.id, subject.name, subject.poster, subject.isTvShow, subject.rating, subject.year)
-                    ) + currentList
+            if (isAniFam) {
+                val rawNum = subject.id.removePrefix("anifam_")
+                val numId = rawNum.toIntOrNull() ?: return@launch
+                val currentList = _cloudFavoritesAniFam.value
+                val isFav = currentList.any { 
+                    it.id == subject.id || it.id == "anifam_$numId" || it.id == rawNum || it.id.removePrefix("anifam_") == rawNum 
                 }
-                try {
-                    val api = MovieBoxRetrofitClient.getApi(prefs)
-                    api.toggleWatchlist(com.example.data.model.WantToSeeRequest(subject.id, if (nextState) 1 else 2, if (subject.isTvShow) 2 else 1))
-                } catch (e: Exception) {}
-            } else {
-                val isFav = repository.isFavoriteDirect(subject.id)
-                if (isFav) {
-                    repository.deleteFavorite(subject.id)
+                if (isLoggedIn) {
+                    if (isFav) {
+                        _cloudFavoritesAniFam.value = currentList.filter { 
+                            it.id != subject.id && it.id != "anifam_$numId" && it.id != rawNum && it.id.removePrefix("anifam_") != rawNum 
+                        }
+                        try {
+                            aniFamApi.removeFromWatchlist(numId)
+                        } catch (e: Exception) {
+                            android.util.Log.w("MovieViewModel", "AniFam removeFromWatchlist failed: ${e.message}")
+                        }
+                    } else {
+                        val newEntity = FavoriteEntity(
+                            id = "anifam_$numId",
+                            name = subject.name,
+                            poster = subject.poster,
+                            isTvShow = subject.isTvShow,
+                            rating = subject.rating,
+                            year = subject.year
+                        )
+                        _cloudFavoritesAniFam.value = listOf(newEntity) + currentList
+                        try {
+                            aniFamApi.addToWatchlist(numId)
+                        } catch (e: Exception) {
+                            android.util.Log.w("MovieViewModel", "AniFam addToWatchlist failed: ${e.message}")
+                        }
+                    }
                 } else {
-                    repository.insertFavorite(
-                        FavoriteEntity(subject.id, subject.name, subject.poster, subject.isTvShow, subject.rating, subject.year)
-                    )
+                    val localId = "anifam_$numId"
+                    val isLocalFav = repository.isFavoriteDirect(localId) || repository.isFavoriteDirect(subject.id) || repository.isFavoriteDirect(rawNum)
+                    if (isLocalFav) {
+                        repository.deleteFavorite(localId)
+                        repository.deleteFavorite(subject.id)
+                        repository.deleteFavorite(rawNum)
+                    } else {
+                        repository.insertFavorite(
+                            FavoriteEntity(
+                                id = localId,
+                                name = subject.name,
+                                poster = subject.poster,
+                                isTvShow = subject.isTvShow,
+                                rating = subject.rating,
+                                year = subject.year
+                            )
+                        )
+                    }
+                }
+            } else {
+                if (isLoggedIn) {
+                    val currentList = _cloudFavoritesMovieBox.value
+                    val isFav = currentList.any { it.id == subject.id }
+                    val nextState = !isFav
+                    if (isFav) {
+                        _cloudFavoritesMovieBox.value = currentList.filter { it.id != subject.id }
+                    } else {
+                        _cloudFavoritesMovieBox.value = listOf(
+                            FavoriteEntity(subject.id, subject.name, subject.poster, subject.isTvShow, subject.rating, subject.year)
+                        ) + currentList
+                    }
+                    try {
+                        val api = MovieBoxRetrofitClient.getApi(prefs)
+                        api.toggleWatchlist(com.example.data.model.WantToSeeRequest(subject.id, if (nextState) 1 else 2, if (subject.isTvShow) 2 else 1))
+                    } catch (e: Exception) {}
+                } else {
+                    val isFav = repository.isFavoriteDirect(subject.id)
+                    if (isFav) {
+                        repository.deleteFavorite(subject.id)
+                    } else {
+                        repository.insertFavorite(
+                            FavoriteEntity(subject.id, subject.name, subject.poster, subject.isTvShow, subject.rating, subject.year)
+                        )
+                    }
                 }
             }
         }
@@ -1469,32 +2170,57 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
             return // Keep local favorites if not logged in
         }
         viewModelScope.launch {
-            try {
-                val api = MovieBoxRetrofitClient.getApi(prefs)
-                val response = api.getWatchlist(page = 1, pageSize = 100)
-                if (response.code == 0) {
-                    val items = response.data?.items ?: emptyList()
-                    val favorites = items.mapNotNull { item ->
-                        val sub = item.subject ?: return@mapNotNull null
+            if (isAniFam) {
+                try {
+                    val response = aniFamApi.getWatchlist(page = 1)
+                    val favorites = response.data.map { item ->
                         FavoriteEntity(
-                            id = sub.subjectId,
-                            name = sub.title,
-                            poster = sub.cover?.get("url") ?: "",
-                            isTvShow = sub.subjectType == 2,
-                            rating = sub.imdbRatingValue.takeIf { it.isNotBlank() && it != "0" && it != "0.0" },
-                            year = if (sub.releaseDate.length >= 4) sub.releaseDate.take(4) else null
+                            id = "anifam_${item.id}",
+                            name = item.title,
+                            poster = item.fullPosterUrl,
+                            isTvShow = item.type != "Movie",
+                            rating = item.score?.let { if (it > 0.0) String.format("%.1f", it) else null },
+                            year = item.type
                         )
                     }
-                    _cloudFavorites.value = favorites
+                    _cloudFavoritesAniFam.value = favorites
+                } catch (e: Exception) {
+                    android.util.Log.e("MovieViewModel", "Failed to refresh AniFam watchlist", e)
                 }
-            } catch (e: Exception) {
-                // Ignore or log error
+            } else {
+                try {
+                    val api = MovieBoxRetrofitClient.getApi(prefs)
+                    val response = api.getWatchlist(page = 1, pageSize = 100)
+                    if (response.code == 0) {
+                        val items = response.data?.items ?: emptyList()
+                        val favorites = items.mapNotNull { item ->
+                            val sub = item.subject ?: return@mapNotNull null
+                            FavoriteEntity(
+                                id = sub.subjectId,
+                                name = sub.title,
+                                poster = sub.cover?.get("url") ?: "",
+                                isTvShow = sub.subjectType == 2,
+                                rating = sub.imdbRatingValue.takeIf { it.isNotBlank() && it != "0" && it != "0.0" },
+                                year = if (sub.releaseDate.length >= 4) sub.releaseDate.take(4) else null
+                            )
+                        }
+                        _cloudFavoritesMovieBox.value = favorites
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("MovieViewModel", "Failed to refresh MovieBox watchlist", e)
+                }
             }
         }
     }
 
     fun isFavoriteFlow(id: String): Flow<Boolean> {
-        return favoritesList.map { list -> list.any { it.id == id } }
+        val rawId = id.removePrefix("anifam_")
+        val altId = "anifam_$rawId"
+        return favoritesList.map { list -> 
+            list.any { 
+                it.id == id || it.id == altId || it.id == rawId || it.id.removePrefix("anifam_") == rawId 
+            } 
+        }
     }
 
     // Save playback position tick
@@ -1503,11 +2229,12 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
         mediaDurationMs = durationMs
         
         val subject = selectedSubject ?: return
+        val prefix = if (isAniFam) "anifam" else "moviebox"
         val id = if (subject.isTvShow) {
             val ep = currentEpisode ?: return
-            "${subject.id}_S${ep.seasonNumber}_E${ep.episodeNumber}"
+            "${prefix}_${subject.id}_S${ep.seasonNumber}_E${ep.episodeNumber}"
         } else {
-            subject.id
+            "${prefix}_${subject.id}"
         }
 
         viewModelScope.launch {

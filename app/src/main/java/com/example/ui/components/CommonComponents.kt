@@ -203,16 +203,20 @@ fun DashboardShimmerScreen() {
 }
 
 @Composable
-fun MovieGridItem(movie: MovieSubject, showRating: Boolean = false, onClick: () -> Unit) {
+fun MovieGridItem(
+    movie: MovieSubject,
+    modifier: Modifier = Modifier.width(110.dp),
+    showRating: Boolean = false,
+    onClick: () -> Unit
+) {
     Column(
-        modifier = Modifier
-            .width(110.dp)
+        modifier = modifier
             .clickable { onClick() }
     ) {
         Box(
             modifier = Modifier
-                .height(160.dp)
                 .fillMaxWidth()
+                .aspectRatio(2f / 3f)
                 .clip(RoundedCornerShape(8.dp))
         ) {
             val optimalPosterUrl = androidx.compose.runtime.remember(movie.poster) {
@@ -241,22 +245,6 @@ fun MovieGridItem(movie: MovieSubject, showRating: Boolean = false, onClick: () 
                 error = placeholderPainter,
                 modifier = Modifier.fillMaxSize()
             )
-            // Rating Tag
-            if (showRating) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(4.dp)
-                        .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(4.dp))
-                        .padding(horizontal = 4.dp, vertical = 2.dp)
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Filled.Star, contentDescription = "Rating", tint = AccentAmber, modifier = Modifier.size(10.dp))
-                        Spacer(modifier = Modifier.width(2.dp))
-                        Text(movie.rating ?: "Not available", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                    }
-                }
-            }
         }
         Spacer(modifier = Modifier.height(6.dp))
         Text(
@@ -267,11 +255,13 @@ fun MovieGridItem(movie: MovieSubject, showRating: Boolean = false, onClick: () 
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
-        Text(
-            text = movie.year ?: "Not available",
-            fontSize = 11.sp,
-            color = TextSecondary
-        )
+        if (!movie.year.isNullOrBlank() && movie.year != "Not available") {
+            Text(
+                text = movie.year,
+                fontSize = 11.sp,
+                color = TextSecondary
+            )
+        }
     }
 }
 

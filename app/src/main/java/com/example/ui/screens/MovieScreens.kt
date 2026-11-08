@@ -82,8 +82,16 @@ import androidx.compose.foundation.gestures.detectTapGestures
 
 
 fun downloadVideo(context: android.content.Context, url: String, title: String, posterUrl: String = "", showToast: Boolean = true) {
+    val postToast: (String) -> Unit = { msg ->
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            try {
+                android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
+            } catch (_: Throwable) {}
+        }
+    }
+
     if (url.isEmpty()) {
-        if (showToast) android.widget.Toast.makeText(context, "Stream URL is empty", android.widget.Toast.LENGTH_SHORT).show()
+        if (showToast) postToast("Stream URL is empty")
         return
     }
     try {
@@ -105,6 +113,8 @@ fun downloadVideo(context: android.content.Context, url: String, title: String, 
                         connectTimeout = 6000
                         readTimeout = 6000
                         instanceFollowRedirects = true
+                        setRequestProperty("User-Agent", "okhttp/4.12.0")
+                        setRequestProperty("accept", "image/webp,image/apng,image/*,*/*;q=0.8")
                     }
                     if (conn.responseCode in 200..299) {
                         val bytes = conn.inputStream.use { it.readBytes() }
@@ -137,6 +147,10 @@ fun downloadVideo(context: android.content.Context, url: String, title: String, 
             } catch (e: Exception) { }
         }
 
+        val moviesDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES)
+        val anyFilmDir = java.io.File(moviesDir, "AnyFilm")
+        if (!anyFilmDir.exists()) anyFilmDir.mkdirs()
+
         val request = android.app.DownloadManager.Request(android.net.Uri.parse(url))
         val fileName = "$safeTitle.mp4"
         request.setTitle(title)
@@ -145,11 +159,11 @@ fun downloadVideo(context: android.content.Context, url: String, title: String, 
         request.setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_MOVIES, "AnyFilm/$fileName")
         manager.enqueue(request)
         if (showToast) {
-            android.widget.Toast.makeText(context, "Download started...", android.widget.Toast.LENGTH_SHORT).show()
+            postToast("Download started...")
         }
     } catch (e: Exception) {
         if (showToast) {
-            android.widget.Toast.makeText(context, "Failed to start download: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+            postToast("Failed to start download: ${e.message}")
         }
     }
 }
@@ -1486,16 +1500,20 @@ fun DashboardShimmerScreen() {
 }
 
 @Composable
-fun MovieGridItem(movie: MovieSubject, showRating: Boolean = false, onClick: () -> Unit) {
+fun MovieGridItem(
+    movie: MovieSubject,
+    modifier: Modifier = Modifier.width(110.dp),
+    showRating: Boolean = false,
+    onClick: () -> Unit
+) {
     Column(
-        modifier = Modifier
-            .width(110.dp)
+        modifier = modifier
             .clickable { onClick() }
     ) {
         Box(
             modifier = Modifier
-                .height(160.dp)
                 .fillMaxWidth()
+                .aspectRatio(2f / 3f)
                 .clip(RoundedCornerShape(8.dp))
         ) {
             val optimalPosterUrl = androidx.compose.runtime.remember(movie.poster) {
@@ -1524,22 +1542,6 @@ fun MovieGridItem(movie: MovieSubject, showRating: Boolean = false, onClick: () 
                 error = placeholderPainter,
                 modifier = Modifier.fillMaxSize()
             )
-            // Rating Tag
-            if (showRating) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(4.dp)
-                        .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(4.dp))
-                        .padding(horizontal = 4.dp, vertical = 2.dp)
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Filled.Star, contentDescription = "Rating", tint = AccentAmber, modifier = Modifier.size(10.dp))
-                        Spacer(modifier = Modifier.width(2.dp))
-                        Text(movie.rating ?: "Not available", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                    }
-                }
-            }
         }
         Spacer(modifier = Modifier.height(6.dp))
         Text(
@@ -1550,11 +1552,13 @@ fun MovieGridItem(movie: MovieSubject, showRating: Boolean = false, onClick: () 
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
-        Text(
-            text = movie.year ?: "Not available",
-            fontSize = 11.sp,
-            color = TextSecondary
-        )
+        if (!movie.year.isNullOrBlank() && movie.year != "Not available") {
+            Text(
+                text = movie.year,
+                fontSize = 11.sp,
+                color = TextSecondary
+            )
+        }
     }
 }
 
@@ -1609,7 +1613,7 @@ fun SearchScreen(viewModel: MovieViewModel) {
                 IconButton(onClick = {
                     if (searchInput.isNotBlank()) {
                         isSearchSubmitted = true
-                        viewModel.searchMovies(searchInput)
+                        viewModel.searchMovies(searchInput, immediate = true)
                         focusManager.clearFocus()
                     }
                 }) {
@@ -1632,7 +1636,7 @@ fun SearchScreen(viewModel: MovieViewModel) {
                 onSearch = {
                     if (searchInput.isNotBlank()) {
                         isSearchSubmitted = true
-                        viewModel.searchMovies(searchInput)
+                        viewModel.searchMovies(searchInput, immediate = true)
                         focusManager.clearFocus()
                     }
                 }
@@ -1665,14 +1669,16 @@ fun SearchScreen(viewModel: MovieViewModel) {
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxSize()
             ) {
-                item {
-                    Text(
-                        text = if (searchInput.isEmpty()) "Trending Searches" else "Suggestions",
-                        color = TextPrimary,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(bottom = 8.dp)
-                    )
+                if (suggestions.isNotEmpty()) {
+                    item {
+                        Text(
+                            text = if (searchInput.isEmpty()) "Trending Searches" else "Suggestions",
+                            color = TextPrimary,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+                    }
                 }
                 
                 itemsIndexed(suggestions) { index, suggestion ->
@@ -1682,7 +1688,7 @@ fun SearchScreen(viewModel: MovieViewModel) {
                             .clickable {
                                 searchInput = suggestion
                                 isSearchSubmitted = true
-                                viewModel.searchMovies(suggestion)
+                                viewModel.searchMovies(suggestion, immediate = true)
                                 focusManager.clearFocus()
                             }
                             .background(ObsidianCard, RoundedCornerShape(8.dp))
@@ -1770,10 +1776,12 @@ fun SearchScreen(viewModel: MovieViewModel) {
                             }
                             Spacer(modifier = Modifier.height(6.dp))
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Filled.Star, contentDescription = "Rating", tint = AccentAmber, modifier = Modifier.size(14.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(movie.rating ?: "8.5", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
-                                Spacer(modifier = Modifier.width(12.dp))
+                                if (!movie.rating.isNullOrBlank() && movie.rating != "Not available") {
+                                    Icon(Icons.Filled.Star, contentDescription = "Rating", tint = AccentAmber, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(movie.rating, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                }
                                 Text(movie.year ?: "", fontSize = 12.sp, color = TextSecondary)
                                 if (movie.isTvShow) {
                                     Spacer(modifier = Modifier.width(8.dp))
@@ -1858,8 +1866,13 @@ fun WatchlistScreen(viewModel: MovieViewModel, onBack: () -> Unit = {}) {
                             .fillMaxWidth()
                             .clickable {
                                 // Maps entities back to subjects
+                                val subjectId = if (viewModel.isAniFam) {
+                                    if (movie.id.startsWith("anifam_")) movie.id else "anifam_${movie.id}"
+                                } else {
+                                    movie.id
+                                }
                                 val subject = MovieSubject(
-                                    id = movie.id,
+                                    id = subjectId,
                                     name = movie.name,
                                     poster = movie.poster,
                                     isTvShow = movie.isTvShow,
@@ -1886,7 +1899,12 @@ fun WatchlistScreen(viewModel: MovieViewModel, onBack: () -> Unit = {}) {
                             Text((movie.year ?: "Not available") + " • " + if (movie.isTvShow) "TV Show" else "Movie", fontSize = 13.sp, color = TextSecondary)
                         }
                         IconButton(onClick = {
-                            val subject = MovieSubject(id = movie.id, name = movie.name, poster = movie.poster)
+                            val subjectId = if (viewModel.isAniFam) {
+                                if (movie.id.startsWith("anifam_")) movie.id else "anifam_${movie.id}"
+                            } else {
+                                movie.id
+                            }
+                            val subject = MovieSubject(id = subjectId, name = movie.name, poster = movie.poster)
                             viewModel.toggleFavorite(subject)
                         }) {
                             Icon(Icons.Filled.BookmarkRemove, contentDescription = "Remove", tint = CinematicRed)
@@ -2340,18 +2358,23 @@ fun PlayerScreen(viewModel: MovieViewModel) {
             
         val renderersFactory = androidx.media3.exoplayer.DefaultRenderersFactory(context).apply {
             setExtensionRendererMode(androidx.media3.exoplayer.DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+            setEnableDecoderFallback(true)
             setMediaCodecSelector { mimeType, requiresSecure, requiresTunneling ->
                 val decoders = androidx.media3.exoplayer.mediacodec.MediaCodecUtil.getDecoderInfos(mimeType, requiresSecure, requiresTunneling)
-                decoders.sortedWith { d1, d2 ->
-                    val n1 = d1.name.lowercase()
-                    val n2 = d2.name.lowercase()
-                    val sw1 = n1.contains("google") || n1.contains("c2.android") || n1.contains("sw")
-                    val sw2 = n2.contains("google") || n2.contains("c2.android") || n2.contains("sw")
-                    when {
-                        !sw1 && sw2 -> -1 // Priority 1: Hardware decoders (Adreno, Exynos, Mali, Tensor)
-                        sw1 && !sw2 -> 1  // Priority 2: Software fallback
-                        else -> 0
+                if (mimeType.startsWith("video/")) {
+                    decoders.sortedWith { d1, d2 ->
+                        val n1 = d1.name.lowercase()
+                        val n2 = d2.name.lowercase()
+                        val sw1 = n1.contains("google") || n1.contains("c2.android") || n1.contains("sw")
+                        val sw2 = n2.contains("google") || n2.contains("c2.android") || n2.contains("sw")
+                        when {
+                            !sw1 && sw2 -> -1 // Priority 1: Hardware decoders (Adreno, Exynos, Mali, Tensor)
+                            sw1 && !sw2 -> 1  // Priority 2: Software fallback
+                            else -> 0
+                        }
                     }
+                } else {
+                    decoders
                 }
             }
         }
@@ -2387,8 +2410,9 @@ fun PlayerScreen(viewModel: MovieViewModel) {
         ExoPlayer.Builder(context)
             .setRenderersFactory(renderersFactory)
             .setLoadControl(loadControl)
-            .setAudioAttributes(audioAttributes, true)
+            .setAudioAttributes(audioAttributes, false)
             .build().apply {
+                volume = 1.0f
                 playWhenReady = viewModel.isPlaying
             }
     }
@@ -2423,11 +2447,28 @@ fun PlayerScreen(viewModel: MovieViewModel) {
     LaunchedEffect(streamUrl, subtitleUrl) {
         if (streamUrl.isNotEmpty()) {
             val httpDataSourceFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
-                .setUserAgent("MovieBoxPro/16.2.1 (Android 14; com.community.mbox.in)")
+                .setUserAgent(if (viewModel.isAniFam) "okhttp/4.12.0" else "MovieBoxPro/16.2.1 (Android 14; com.community.mbox.in)")
                 .setAllowCrossProtocolRedirects(true)
             
+            val requestHeaders = mutableMapOf<String, String>()
+            if (viewModel.isAniFam || streamUrl.contains("dramahot.top") || streamUrl.contains("zokoanime")) {
+                requestHeaders["Referer"] = "https://zokoanime.video/"
+                requestHeaders["Origin"] = "https://zokoanime.video"
+            }
             if (selectedCookie.isNotEmpty()) {
-                httpDataSourceFactory.setDefaultRequestProperties(mapOf("Cookie" to selectedCookie))
+                if (selectedCookie.contains("=") && (selectedCookie.contains("Referer=") || selectedCookie.contains("Origin="))) {
+                    selectedCookie.split(";").forEach { pair ->
+                        val parts = pair.split("=", limit = 2)
+                        if (parts.size == 2) {
+                            requestHeaders[parts[0].trim()] = parts[1].trim()
+                        }
+                    }
+                } else {
+                    requestHeaders["Cookie"] = selectedCookie
+                }
+            }
+            if (requestHeaders.isNotEmpty()) {
+                httpDataSourceFactory.setDefaultRequestProperties(requestHeaders)
             }
 
             // Wrap with on-disk LRU media cache for zero-stutter seeks and zero repeated downloads
@@ -2544,6 +2585,16 @@ fun PlayerScreen(viewModel: MovieViewModel) {
         }
         try {
             val builder = exoPlayer.trackSelectionParameters.buildUpon()
+            builder.setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_AUDIO, false)
+            if (viewModel.isAniFam) {
+                val isDub = viewModel.selectedResource?.resourceId?.lowercase()?.contains("dub") == true ||
+                            viewModel.selectedResource?.name?.lowercase()?.contains("dub") == true
+                if (isDub) {
+                    builder.setPreferredAudioLanguage("en")
+                } else {
+                    builder.setPreferredAudioLanguage("ja")
+                }
+            }
             if (q == "Auto") {
                 builder.clearVideoSizeConstraints()
                 builder.setForceHighestSupportedBitrate(false)
@@ -2556,6 +2607,24 @@ fun PlayerScreen(viewModel: MovieViewModel) {
             exoPlayer.trackSelectionParameters = builder.build()
         } catch (e: Exception) {
             // Log fallback or safety
+        }
+    }
+
+    // Dynamic audio track preference sync for AniFam
+    LaunchedEffect(viewModel.selectedResource) {
+        if (viewModel.isAniFam) {
+            try {
+                val isDub = viewModel.selectedResource?.resourceId?.lowercase()?.contains("dub") == true ||
+                            viewModel.selectedResource?.name?.lowercase()?.contains("dub") == true
+                val builder = exoPlayer.trackSelectionParameters.buildUpon()
+                builder.setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_AUDIO, false)
+                if (isDub) {
+                    builder.setPreferredAudioLanguage("en")
+                } else {
+                    builder.setPreferredAudioLanguage("ja")
+                }
+                exoPlayer.trackSelectionParameters = builder.build()
+            } catch (_: Exception) {}
         }
     }
 
@@ -2859,7 +2928,8 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                                     }
                                     val bestStream = viewModel.playInfo?.streamList?.let { viewModel.selectHighestQualityStream(it) }
                                     val dlUrl = bestStream?.url?.takeIf { it.isNotEmpty() && !it.contains("b164fbfb4347792950bdfbfb563d39d9.mp4") } ?: streamUrl
-                                    downloadVideo(context, dlUrl, safeTitle, subject.poster)
+                                    val cookies = bestStream?.cookie ?: ""
+                                    viewModel.startDownload(context, subject, safeTitle, dlUrl, cookies)
                                 }) {
                                     Icon(
                                         Icons.Filled.Download,
@@ -3115,7 +3185,7 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                                     }
 
                                     // 1. Audio Dub Language
-                                    val currentDub = viewModel.selectedResource?.name ?: "Original"
+                                    val currentDub = viewModel.selectedResource?.name ?: if (viewModel.isAniFam) "Sub" else "Original"
                                     Row(
                                         modifier = Modifier
                                             .fillMaxWidth()
@@ -3127,7 +3197,7 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                                         Row(verticalAlignment = Alignment.CenterVertically) {
                                             Icon(Icons.Filled.VolumeUp, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
                                             Spacer(modifier = Modifier.width(16.dp))
-                                            Text("Audio Dub Language", color = Color.White, fontSize = 14.sp)
+                                            Text(if (viewModel.isAniFam) "Audio / Track" else "Audio Dub Language", color = Color.White, fontSize = 14.sp)
                                         }
                                         Text(currentDub, color = CinematicRed, fontSize = 14.sp, fontWeight = FontWeight.Bold)
                                     }
@@ -3231,7 +3301,7 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                                                     "language" -> viewModel.selectedResource == item
                                                     "season" -> viewModel.selectedSeason == item
                                                     "subtitle" -> if (item == "None") viewModel.selectedSubtitle == null else viewModel.selectedSubtitle?.language == item
-                                                    "quality" -> viewModel.selectedStream == item
+                                                    "quality" -> viewModel.selectedStream?.quality == (item as com.example.data.model.StreamItem).quality
                                                     "speed" -> {
                                                         val currentSpeed = exoPlayer.playbackParameters.speed
                                                         val itemSpeed = when (item as String) {
@@ -3267,8 +3337,10 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                                                                 if (prevPos > 0) {
                                                                     viewModel.playbackProgressMs = prevPos
                                                                 }
-                                                                viewModel.selectedStream = item as com.example.data.model.StreamItem
-                                                                android.widget.Toast.makeText(context, "Quality: ${(item as com.example.data.model.StreamItem).quality}", android.widget.Toast.LENGTH_SHORT).show()
+                                                                val streamItem = item as com.example.data.model.StreamItem
+                                                                viewModel.selectedStream = streamItem
+                                                                viewModel.setDefaultStreamQualityPref(streamItem.quality)
+                                                                android.widget.Toast.makeText(context, "Quality: ${streamItem.quality}", android.widget.Toast.LENGTH_SHORT).show()
                                                             }
                                                             "speed" -> {
                                                                 val speedVal = when (item as String) {
@@ -3335,7 +3407,7 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                                     shape = RoundedCornerShape(8.dp),
                                     contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
                                 ) {
-                                    val currentDub = viewModel.selectedResource?.name ?: "Original Audio"
+                                    val currentDub = viewModel.selectedResource?.name ?: if (viewModel.isAniFam) "Sub" else "Original Audio"
                                     Text(
                                         text = "$currentDub ▾",
                                         color = Color.White,
@@ -3344,8 +3416,8 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                                 }
                             }
 
-                            // Season trigger button (only for TV Shows)
-                            if (subject.isTvShow && viewModel.seasonsList.isNotEmpty()) {
+                            // Season trigger button (only for TV Shows, hidden for AniFam)
+                            if (subject.isTvShow && viewModel.seasonsList.isNotEmpty() && !viewModel.isAniFam) {
                                 Button(
                                     onClick = { activeSheet = "season" },
                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2D2D30)),
@@ -3407,7 +3479,7 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                             ) {
                                 val activeSeasonInfo = subject.seasonList.find { it.season == viewModel.selectedSeason }
                                 val seasonResolutions = activeSeasonInfo?.resolutions?.takeIf { it.isNotEmpty() }?.sorted()?.map { "${it}p" }
-                                val downloadQualities = seasonResolutions ?: listOf("480p", "720p", "1080p")
+                                val downloadQualities = if (viewModel.isAniFam) listOf("360p", "720p", "1080p") else (seasonResolutions ?: listOf("480p", "720p", "1080p"))
 
                                 androidx.compose.runtime.LaunchedEffect(downloadQualities) {
                                     if (downloadQualities.isNotEmpty() && !downloadQualities.any { it.equals(selectedDownloadQuality, ignoreCase = true) }) {
@@ -3775,7 +3847,7 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                                 }
 
                                 // 1. Audio Dub Language
-                                val currentDub = viewModel.selectedResource?.name ?: "Original"
+                                val currentDub = viewModel.selectedResource?.name ?: if (viewModel.isAniFam) "Sub" else "Original"
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -3787,7 +3859,7 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         Icon(Icons.Filled.VolumeUp, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
                                         Spacer(modifier = Modifier.width(16.dp))
-                                        Text("Audio Dub Language", color = Color.White, fontSize = 14.sp)
+                                        Text(if (viewModel.isAniFam) "Audio / Track" else "Audio Dub Language", color = Color.White, fontSize = 14.sp)
                                     }
                                     Text(currentDub, color = CinematicRed, fontSize = 14.sp, fontWeight = FontWeight.Bold)
                                 }
@@ -3893,7 +3965,7 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                                             "language" -> viewModel.selectedResource == item
                                             "season" -> viewModel.selectedSeason == item
                                             "subtitle" -> if (item == "None") viewModel.selectedSubtitle == null else viewModel.selectedSubtitle?.language == item
-                                            "quality" -> viewModel.selectedStream == item
+                                            "quality" -> viewModel.selectedStream?.quality == (item as com.example.data.model.StreamItem).quality
                                             "speed" -> {
                                                 val currentSpeed = exoPlayer.playbackParameters.speed
                                                 val itemSpeed = when (item as String) {
@@ -3929,8 +4001,10 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                                                         if (prevPos > 0) {
                                                             viewModel.playbackProgressMs = prevPos
                                                         }
-                                                        viewModel.selectedStream = item as com.example.data.model.StreamItem
-                                                        android.widget.Toast.makeText(context, "Quality: ${(item as com.example.data.model.StreamItem).quality}", android.widget.Toast.LENGTH_SHORT).show()
+                                                        val streamItem = item as com.example.data.model.StreamItem
+                                                        viewModel.selectedStream = streamItem
+                                                        viewModel.setDefaultStreamQualityPref(streamItem.quality)
+                                                        android.widget.Toast.makeText(context, "Quality: ${streamItem.quality}", android.widget.Toast.LENGTH_SHORT).show()
                                                     }
                                                     "speed" -> {
                                                         val speedVal = when (item as String) {
@@ -4380,18 +4454,22 @@ fun DownloadScreen(viewModel: MovieViewModel) {
                     } catch (e: Exception) { }
                 }
 
-                val baseMovies = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES)
-                val primaryDir = java.io.File(baseMovies, "AnyFilm")
-                val legacyDir = java.io.File(baseMovies, "Genga World")
-                val dir = if (primaryDir.exists()) primaryDir else if (legacyDir.exists()) legacyDir else primaryDir
-                val scanned = if (dir.exists() && dir.isDirectory) {
-                    dir.listFiles()?.filter { it.extension.equals("mp4", ignoreCase = true) }?.sortedBy { it.name } ?: emptyList()
-                } else {
-                    emptyList()
-                }
+                val candidateDirs = listOfNotNull(
+                    java.io.File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES), "AnyFilm"),
+                    context.getExternalFilesDir(android.os.Environment.DIRECTORY_MOVIES)?.let { java.io.File(it, "AnyFilm") },
+                    java.io.File(context.filesDir, "AnyFilm"),
+                    java.io.File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES), "Genga World")
+                )
+                val scanned = candidateDirs
+                    .filter { it.exists() && it.isDirectory }
+                    .flatMap { it.listFiles()?.toList() ?: emptyList() }
+                    .filter { it.extension.equals("mp4", ignoreCase = true) }
+                    .distinctBy { it.name }
+                    .sortedBy { it.name }
 
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                    viewModel.activeDownloads = currentActive
+                    val combined = (viewModel.inAppDownloads + currentActive).distinctBy { it.id }
+                    viewModel.activeDownloads = combined
                     if (viewModel.downloadedFiles.size != scanned.size || viewModel.downloadedFiles.map { it.name } != scanned.map { it.name }) {
                         viewModel.downloadedFiles = scanned
                     }
@@ -4465,12 +4543,28 @@ fun DownloadScreen(viewModel: MovieViewModel) {
                                 match?.groupValues?.get(1)?.trim() ?: safeActiveTitle
                             }
                             val activePosterFile = remember(active.title) {
-                                val titleFile = java.io.File(anyFilmDir, "$safeActiveTitle.jpg")
-                                if (titleFile.exists()) titleFile else {
-                                    val showFile = java.io.File(anyFilmDir, "$safeShowPrefix.jpg")
-                                    if (showFile.exists()) showFile else null
+                                val searchDirs = mutableListOf<java.io.File>()
+                                searchDirs.add(anyFilmDir)
+                                context.getExternalFilesDir(android.os.Environment.DIRECTORY_MOVIES)?.let { searchDirs.add(java.io.File(it, "AnyFilm")) }
+                                searchDirs.add(java.io.File(context.filesDir, "AnyFilm"))
+
+                                val extensions = listOf("jpg", "webp", "png", "jpeg")
+                                for (d in searchDirs.distinct()) {
+                                    for (ext in extensions) {
+                                        val tFile = java.io.File(d, "$safeActiveTitle.$ext")
+                                        if (tFile.exists() && tFile.length() > 0) return@remember tFile
+                                        val sFile = java.io.File(d, "$safeShowPrefix.$ext")
+                                        if (sFile.exists() && sFile.length() > 0) return@remember sFile
+                                    }
                                 }
+                                null
                             }
+
+                            val posterModel: Any? = if (activePosterFile != null && activePosterFile.exists()) {
+                                activePosterFile
+                            } else if (active.posterUrl.isNotEmpty()) {
+                                active.posterUrl
+                            } else null
 
                             Row(
                                 modifier = Modifier
@@ -4479,12 +4573,11 @@ fun DownloadScreen(viewModel: MovieViewModel) {
                                     .padding(horizontal = 12.dp, vertical = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                if (activePosterFile != null && activePosterFile.exists()) {
+                                if (posterModel != null) {
                                     AsyncImage(
                                         model = coil.request.ImageRequest.Builder(LocalContext.current)
-                                            .data(activePosterFile)
+                                            .data(posterModel)
                                             .crossfade(100)
-                                            .memoryCacheKey(activePosterFile.absolutePath)
                                             .build(),
                                         contentDescription = "Poster",
                                         modifier = Modifier.size(56.dp, 42.dp).clip(RoundedCornerShape(6.dp)),
@@ -4565,6 +4658,7 @@ fun DownloadScreen(viewModel: MovieViewModel) {
 
                                 IconButton(
                                     onClick = {
+                                        viewModel.cancelInAppDownload(active.id)
                                         manager?.remove(active.id)
                                     },
                                     modifier = Modifier.size(32.dp)
@@ -4600,15 +4694,37 @@ fun DownloadScreen(viewModel: MovieViewModel) {
                             val safeShowPrefix = remember(showName) { showName.replace(Regex("[^a-zA-Z0-9.-]"), "_") }
 
                             val posterFile = remember(showName, filesForShow) {
-                                val showLevel = java.io.File(anyFilmDir, "$safeShowPrefix.jpg")
-                                if (showLevel.exists()) {
-                                    showLevel
-                                } else {
-                                    filesForShow.firstNotNullOfOrNull { f ->
-                                        val p = java.io.File(anyFilmDir, "${f.nameWithoutExtension}.jpg")
-                                        if (p.exists()) p else null
+                                val searchDirs = mutableListOf<java.io.File>()
+                                filesForShow.firstOrNull()?.parentFile?.let { searchDirs.add(it) }
+                                searchDirs.add(anyFilmDir)
+                                context.getExternalFilesDir(android.os.Environment.DIRECTORY_MOVIES)?.let { searchDirs.add(java.io.File(it, "AnyFilm")) }
+                                searchDirs.add(java.io.File(context.filesDir, "AnyFilm"))
+
+                                val extensions = listOf("jpg", "webp", "png", "jpeg")
+
+                                // 1. Try show-level poster across all candidate folders
+                                for (d in searchDirs.distinct()) {
+                                    for (ext in extensions) {
+                                        val p = java.io.File(d, "$safeShowPrefix.$ext")
+                                        if (p.exists() && p.length() > 0) return@remember p
                                     }
                                 }
+
+                                // 2. Try episode-level posters for each episode in filesForShow
+                                for (f in filesForShow) {
+                                    val parent = f.parentFile
+                                    for (ext in extensions) {
+                                        if (parent != null) {
+                                            val p = java.io.File(parent, "${f.nameWithoutExtension}.$ext")
+                                            if (p.exists() && p.length() > 0) return@remember p
+                                        }
+                                        for (d in searchDirs.distinct()) {
+                                            val p = java.io.File(d, "${f.nameWithoutExtension}.$ext")
+                                            if (p.exists() && p.length() > 0) return@remember p
+                                        }
+                                    }
+                                }
+                                null
                             }
                             
                             Column(modifier = Modifier.fillMaxWidth().background(com.example.ui.theme.ObsidianCard, RoundedCornerShape(10.dp))) {

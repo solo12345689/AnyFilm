@@ -39,14 +39,11 @@ object ImageOptimizer {
 
         // 1. MovieBox Edge CDN (Alibaba Cloud OSS Image Service on aoneroom.com / pbcdn.aoneroom.com)
         if (trimmedUrl.contains("pbcdn.aoneroom.com") || trimmedUrl.contains("aoneroom.com")) {
-            // If already processed, return as-is
-            if (trimmedUrl.contains("x-oss-process=image")) {
-                return trimmedUrl
-            }
-            // Find closest discrete width bucket (snap up to prevent multiple CDN edge misses)
+            // Strip any existing x-oss-process parameter to avoid staying locked into low-res thumbnails
+            val cleanUrl = trimmedUrl.replace(Regex("[?&]x-oss-process=image[^&]*"), "")
             val bucketWidth = WIDTH_BUCKETS.firstOrNull { it >= targetWidthPx } ?: 1080
-            val separator = if (trimmedUrl.contains("?")) "&" else "?"
-            return "$trimmedUrl${separator}x-oss-process=image/resize,w_$bucketWidth/format,webp"
+            val separator = if (cleanUrl.contains("?")) "&" else "?"
+            return "$cleanUrl${separator}x-oss-process=image/resize,w_$bucketWidth/quality,q_90/format,webp"
         }
 
         // 2. TMDB CDN Optimization (image.tmdb.org)
@@ -55,7 +52,9 @@ object ImageOptimizer {
                 targetWidthPx <= 185 -> "w185"
                 targetWidthPx <= 342 -> "w342"
                 targetWidthPx <= 500 -> "w500"
-                else -> "w780"
+                targetWidthPx <= 780 -> "w780"
+                targetWidthPx <= 1280 -> "w1280"
+                else -> "original"
             }
             return trimmedUrl.replace(Regex("/t/p/(w\\d+|original)/"), "/t/p/$tmdbSize/")
         }

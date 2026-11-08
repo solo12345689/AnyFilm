@@ -28,6 +28,7 @@ fun AuthSheet(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
+    var displayName by remember(viewModel.isLoggedIn) { mutableStateOf("") }
     var email by remember(viewModel.isLoggedIn) { mutableStateOf("") }
     var password by remember(viewModel.isLoggedIn) { mutableStateOf("") }
     var otp by remember(viewModel.isLoggedIn) { mutableStateOf("") }
@@ -112,6 +113,29 @@ fun AuthSheet(
                     )
                 }
 
+                // Display Name Input (Only in Register Mode for AniFam)
+                if (isRegisterMode && viewModel.isAniFam) {
+                    OutlinedTextField(
+                        value = displayName,
+                        onValueChange = { displayName = it },
+                        label = { Text("Display Name") },
+                        leadingIcon = { Icon(Icons.Filled.Person, contentDescription = "Name") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("name_input"),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = CinematicRed,
+                            unfocusedBorderColor = Color.Gray.copy(alpha = 0.3f),
+                            focusedLabelColor = CinematicRed,
+                            unfocusedLabelColor = TextSecondary,
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary
+                        ),
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                }
+
                 // Email Address Input
                 OutlinedTextField(
                     value = email,
@@ -155,8 +179,8 @@ fun AuthSheet(
                     shape = RoundedCornerShape(12.dp)
                 )
 
-                // OTP Code Input (only in Register Mode)
-                if (isRegisterMode) {
+                // OTP Code Input (only in Register Mode for MovieBox)
+                if (isRegisterMode && !viewModel.isAniFam) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -227,16 +251,33 @@ fun AuthSheet(
                             return@Button
                         }
                         if (isRegisterMode) {
-                            if (otp.isEmpty()) {
-                                errorMessage = "Please enter the OTP verification code"
-                                return@Button
+                            if (viewModel.isAniFam) {
+                                if (displayName.isBlank()) {
+                                    errorMessage = "Please enter your display name"
+                                    return@Button
+                                }
+                                if (password.length < 8) {
+                                    errorMessage = "Password must be at least 8 characters"
+                                    return@Button
+                                }
+                                viewModel.registerAccount(email, password, "", onSuccess = {
+                                    Toast.makeText(context, "Account created successfully!", Toast.LENGTH_SHORT).show()
+                                    onDismiss()
+                                }, onError = { err ->
+                                    errorMessage = err
+                                }, displayName = displayName)
+                            } else {
+                                if (otp.isEmpty()) {
+                                    errorMessage = "Please enter the OTP verification code"
+                                    return@Button
+                                }
+                                viewModel.registerAccount(email, password, otp, onSuccess = {
+                                    Toast.makeText(context, "Account created successfully!", Toast.LENGTH_SHORT).show()
+                                    onDismiss()
+                                }, onError = { err ->
+                                    errorMessage = err
+                                })
                             }
-                            viewModel.registerAccount(email, password, otp, onSuccess = {
-                                Toast.makeText(context, "Account created successfully!", Toast.LENGTH_SHORT).show()
-                                onDismiss()
-                            }, onError = { err ->
-                                errorMessage = err
-                            })
                         } else {
                             viewModel.loginWithPassword(email, password, onSuccess = {
                                 Toast.makeText(context, "Signed in successfully!", Toast.LENGTH_SHORT).show()
@@ -293,18 +334,6 @@ fun AuthSheet(
                     fontSize = 14.sp
                 )
             }
-        }
-
-        if (isRegisterMode) {
-            Spacer(modifier = Modifier.height(16.dp))
-            Text(
-                text = "Powered by MovieBoxPro",
-                color = TextSecondary.copy(alpha = 0.5f),
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
-            )
         }
 
         Spacer(modifier = Modifier.height(80.dp))

@@ -1,7 +1,7 @@
 {
-  "versionName": "4.2",
-  "versionCode": 7,
-  "forceUpdate": false,
-  "changelog": "• Added download quality selection\n• Share downloaded videos \n• Save  download videos \n• improve performance ",
-  "downloadUrl": "https://github.com/solo12345689/AnyFilm/releases/download/v4.2/AnyFilm.apk"
+  "versionName": "4.3",
+  "versionCode": 8,
+  "forceUpdate": true,
+  "changelog": "• Add new provider\n• Add OTT\n• Improve app",
+  "downloadUrl": "https://github.com/solo12345689/AnyFilm/releases/download/v4.3/AnyFilm.apk"
 }

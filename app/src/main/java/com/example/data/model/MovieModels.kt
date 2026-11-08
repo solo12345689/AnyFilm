@@ -44,7 +44,8 @@ data class MovieSubject(
     val seasonList: List<SeasonInfo> = emptyList(),
     val resourceDetectors: List<ResourceDetector> = emptyList(),
     val blurHash: String? = null,
-    val averageHue: String? = null
+    val averageHue: String? = null,
+    val backdrop: String? = null
 )
 
 @JsonClass(generateAdapter = true)
@@ -209,14 +210,14 @@ class MovieSubjectAdapter {
         var posterUrl = ""
         val poster = item["poster"]
         if (poster is Map<*, *>) {
-            posterUrl = poster["thumbUrl"]?.toString() ?: poster["webpUrl"]?.toString() ?: poster["url"]?.toString() ?: ""
+            posterUrl = poster["url"]?.toString() ?: poster["webpUrl"]?.toString() ?: poster["thumbUrl"]?.toString() ?: ""
         } else if (poster is String) {
             posterUrl = poster
         }
         if (posterUrl.isEmpty()) {
             val cover = item["cover"]
             if (cover is Map<*, *>) {
-                posterUrl = cover["thumbUrl"]?.toString() ?: cover["webpUrl"]?.toString() ?: cover["url"]?.toString() ?: ""
+                posterUrl = cover["url"]?.toString() ?: cover["webpUrl"]?.toString() ?: cover["thumbUrl"]?.toString() ?: ""
             } else if (cover is String) {
                 posterUrl = cover
             }
@@ -224,13 +225,30 @@ class MovieSubjectAdapter {
         if (posterUrl.isEmpty()) {
             val hp = item["horizontalPoster"] ?: item["horizontalCover"]
             if (hp is Map<*, *>) {
-                posterUrl = hp["thumbUrl"]?.toString() ?: hp["webpUrl"]?.toString() ?: hp["url"]?.toString() ?: ""
+                posterUrl = hp["url"]?.toString() ?: hp["webpUrl"]?.toString() ?: hp["thumbUrl"]?.toString() ?: ""
             } else if (hp is String) {
                 posterUrl = hp
             }
         }
         if (posterUrl.startsWith("//")) {
             posterUrl = "https:$posterUrl"
+        }
+
+        var backdropUrl: String? = null
+        val hpMap = item["horizontalPoster"] ?: item["horizontalCover"] ?: item["banner"]
+        if (hpMap is Map<*, *>) {
+            backdropUrl = hpMap["url"]?.toString() ?: hpMap["webpUrl"]?.toString() ?: hpMap["thumbUrl"]?.toString()
+        } else if (hpMap is String && hpMap.isNotBlank()) {
+            backdropUrl = hpMap
+        }
+        if (backdropUrl.isNullOrBlank()) {
+            val coverMap = item["cover"] ?: item["poster"]
+            if (coverMap is Map<*, *>) {
+                backdropUrl = coverMap["url"]?.toString() ?: coverMap["webpUrl"]?.toString()
+            }
+        }
+        if (backdropUrl != null && backdropUrl.startsWith("//")) {
+            backdropUrl = "https:$backdropUrl"
         }
 
         var blurHash: String? = null
@@ -428,7 +446,8 @@ class MovieSubjectAdapter {
             seasonList = seasonList,
             resourceDetectors = detectorsList,
             blurHash = blurHash,
-            averageHue = averageHue
+            averageHue = averageHue,
+            backdrop = backdropUrl
         )
     }
 

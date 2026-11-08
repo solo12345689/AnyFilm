@@ -4,9 +4,13 @@ import android.content.Context
 import android.content.SharedPreferences
 
 class PreferencesManager(context: Context) {
+    val context: Context = context.applicationContext
     private val prefs: SharedPreferences = context.getSharedPreferences("moviebox_prefs", Context.MODE_PRIVATE)
 
     companion object {
+        const val PROVIDER_MOVIEBOX = "moviebox"
+        const val PROVIDER_ANIFAM = "anifam"
+        const val KEY_ACTIVE_PROVIDER = "active_provider"
         const val KEY_SP_CODE = "sp_code"
         const val KEY_LOCAL_ISO = "custom_local_iso"
         const val KEY_LOCAL_COUNTRY = "custom_local_country"
@@ -14,7 +18,37 @@ class PreferencesManager(context: Context) {
         const val KEY_IS_DEVELOPER = "is_developer"
         const val KEY_MOCK_HOST = "mock_host_key"
         const val KEY_SESSION_ID_COOKIE = "session_id_cookie"
+        const val KEY_ANIFAM_AUTH_TOKEN = "anifam_auth_token"
+        const val KEY_ANIFAM_USER_INFO = "anifam_user_info"
     }
+
+    var activeProvider: String
+        get() = prefs.getString(KEY_ACTIVE_PROVIDER, PROVIDER_MOVIEBOX) ?: PROVIDER_MOVIEBOX
+        set(value) = prefs.edit().putString(KEY_ACTIVE_PROVIDER, value).apply()
+
+    val isAniFam: Boolean
+        get() = activeProvider == PROVIDER_ANIFAM
+
+    fun getActiveCategories(provider: String = activeProvider): String? {
+        val key = "active_categories_$provider"
+        return prefs.getString(key, null) ?: if (provider == PROVIDER_MOVIEBOX) prefs.getString("active_categories", null) else null
+    }
+
+    fun setActiveCategories(categories: String?, provider: String = activeProvider) {
+        val key = "active_categories_$provider"
+        prefs.edit().putString(key, categories).apply()
+        if (provider == PROVIDER_MOVIEBOX) {
+            prefs.edit().putString("active_categories", categories).apply()
+        }
+    }
+
+    var anifamAuthToken: String?
+        get() = prefs.getString(KEY_ANIFAM_AUTH_TOKEN, null)
+        set(value) = prefs.edit().putString(KEY_ANIFAM_AUTH_TOKEN, value).apply()
+
+    var anifamUserInfoJson: String?
+        get() = prefs.getString(KEY_ANIFAM_USER_INFO, null)
+        set(value) = prefs.edit().putString(KEY_ANIFAM_USER_INFO, value).apply()
 
     var spCode: String
         get() = prefs.getString(KEY_SP_CODE, "40401") ?: "40401"
@@ -29,8 +63,8 @@ class PreferencesManager(context: Context) {
         set(value) = prefs.edit().putString(KEY_LOCAL_COUNTRY, value).apply()
         
     var activeCategories: String?
-        get() = prefs.getString("active_categories", null)
-        set(value) = prefs.edit().putString("active_categories", value).apply()
+        get() = getActiveCategories()
+        set(value) = setActiveCategories(value)
 
     var countryCode: String
         get() = prefs.getString(KEY_COUNTRY_CODE, "91") ?: "91"

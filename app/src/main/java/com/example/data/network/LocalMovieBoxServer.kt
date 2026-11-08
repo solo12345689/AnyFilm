@@ -63,11 +63,8 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
     private val okHttpClient = OkHttpClient.Builder()
 
         .connectionPool(okhttp3.ConnectionPool(10, 5, java.util.concurrent.TimeUnit.MINUTES))
-
-        .connectTimeout(6, java.util.concurrent.TimeUnit.SECONDS)
-
-        .readTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
-
+        .connectTimeout(25, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
 
         .build()
@@ -1154,8 +1151,18 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
                             }
 
                             if (suggestions.isEmpty()) {
-                                suggestions = listOf("Action", "Anime", "Drama", "Comedy", "Sci-Fi")
-
+                                suggestions = listOf(
+                                    "Deadpool & Wolverine",
+                                    "Dune: Part Two",
+                                    "Loki",
+                                    "Stranger Things",
+                                    "House of the Dragon",
+                                    "Oppenheimer",
+                                    "The Boys",
+                                    "Avengers: Endgame",
+                                    "Breaking Bad",
+                                    "Spider-Man: Across the Spider-Verse"
+                                )
                             }
 
                             val responseBody = mapOf(
@@ -1173,7 +1180,18 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
                     } catch (e: Exception) {
                         Log.w("LocalMovieBoxServer", "Search-suggestions fallback triggered: ${e.message}")
 
-                        var fallbackSuggestions = listOf("Action", "Anime", "Drama", "Comedy", "Sci-Fi")
+                        var fallbackSuggestions = listOf(
+                            "Deadpool & Wolverine",
+                            "Dune: Part Two",
+                            "Loki",
+                            "Stranger Things",
+                            "House of the Dragon",
+                            "Oppenheimer",
+                            "The Boys",
+                            "Avengers: Endgame",
+                            "Breaking Bad",
+                            "Spider-Man: Across the Spider-Verse"
+                        )
 
                         try {
                             val trendRaw = makeOfficialRequest("POST", "/wefeed-mobile-bff/subject-api/trending/v2", emptyMap(), "{}")
@@ -2685,6 +2703,10 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
 
                 titleStr.contains("Get Free Premium", ignoreCase = true) ||
 
+                titleStr.contains("Diwali", ignoreCase = true) ||
+
+                titleStr.contains("Offer", ignoreCase = true) ||
+
                 titleStr.equals("Categories", ignoreCase = true) ||
 
                 rowType.contains("FILTER", ignoreCase = true) ||
@@ -2710,7 +2732,19 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
                 (row["banner"] as? Map<*, *>)?.get("banners").let { it is List<*> && it.isNotEmpty() } -> {
                     val banner = row["banner"] as Map<String, Any?>
 
-                    banner["banners"] as List<Map<String, Any?>>
+                    val bannerList = banner["banners"] as List<Map<String, Any?>>
+                    bannerList.filter { b ->
+                        val hasRes = b["hasResource"] as? Boolean ?: false
+                        val sub = b["subject"] as? Map<*, *>
+                        val subId = (b["subjectId"] ?: "").toString()
+                        val content = (b["content"] ?: "").toString()
+                        hasRes && sub != null && subId != "0" && subId.isNotBlank() &&
+                            !content.contains("Diwali", ignoreCase = true) &&
+                            !content.contains("Offer", ignoreCase = true) &&
+                            !content.contains("Premium", ignoreCase = true) &&
+                            !content.contains("TV", ignoreCase = true) &&
+                            !content.contains("Join", ignoreCase = true)
+                    }
 
                 }
 
@@ -2787,7 +2821,7 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
 
         val sid = (itemData["subjectId"] ?: itemData["id"] ?: "").toString()
 
-        if (sid.isEmpty()) return null
+        if (sid.isEmpty() || sid == "0") return null
 
         val title = (
 
@@ -2828,6 +2862,13 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
             "Unknown"
 
         ).toString()
+
+        if (title.contains("Diwali Dhamaka", ignoreCase = true) ||
+            title.contains("Special Offer", ignoreCase = true) ||
+            title.contains("Free Premium", ignoreCase = true) ||
+            title.contains("Join Communities", ignoreCase = true) ||
+            title.contains("MovieBoxTV", ignoreCase = true)
+        ) return null
 
         var posterUrl = ""
 
@@ -3332,16 +3373,14 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
         try {
             android.util.Log.i("LocalMovieBoxServer", "Bootstrapping dynamic guest token via visitor-login...")
 
+            val devId = getDeviceId()
+            val visitorPayload = toJsonString(mapOf("device_id" to devId, "deviceId" to devId))
+
             val rawResponse = makeOfficialRequest(
-
                 method = "POST",
-
                 endpoint = "/wefeed-mobile-bff/user-api/visitor-login",
-
                 queryParams = emptyMap(),
-
-                bodyString = "{}"
-
+                bodyString = visitorPayload
             )
 
             val map = parseJsonToMap(rawResponse)

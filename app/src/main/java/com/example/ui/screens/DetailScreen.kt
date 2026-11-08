@@ -97,8 +97,9 @@ fun DetailScreen(viewModel: MovieViewModel) {
                         .fillMaxWidth()
                         .height(300.dp)
                 ) {
-                    val optimalBackdropUrl = androidx.compose.runtime.remember(subject.poster) {
-                        com.example.util.ImageOptimizer.getOptimalUrl(subject.poster, 720)
+                    val optimalBackdropUrl = androidx.compose.runtime.remember(subject.backdrop, subject.poster) {
+                        val sourceUrl = subject.backdrop?.ifBlank { null } ?: subject.poster
+                        com.example.util.ImageOptimizer.getOptimalUrl(sourceUrl, 1080)
                     }
                     val ambientColor = androidx.compose.runtime.remember(subject.averageHue) {
                         com.example.util.ImageOptimizer.parseAverageHue(subject.averageHue)
@@ -113,8 +114,8 @@ fun DetailScreen(viewModel: MovieViewModel) {
                             .data(optimalBackdropUrl)
                             .memoryCacheKey(optimalBackdropUrl)
                             .diskCacheKey(optimalBackdropUrl)
-                            .precision(coil.size.Precision.INEXACT)
-                            .crossfade(false)
+                            .precision(coil.size.Precision.EXACT)
+                            .crossfade(true)
                             .build(),
                         contentDescription = subject.name,
                         contentScale = ContentScale.Crop,
@@ -182,13 +183,19 @@ fun DetailScreen(viewModel: MovieViewModel) {
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.Star, contentDescription = "Rating", tint = AccentAmber, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(subject.rating ?: "Not available", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        if (!subject.rating.isNullOrBlank() && subject.rating != "Not available" && subject.rating != "0" && subject.rating != "0.0") {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Filled.Star, contentDescription = "Rating", tint = AccentAmber, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(subject.rating, color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            }
                         }
-                        Text(subject.year ?: "Not available", color = TextSecondary, fontSize = 14.sp)
-                        Text(subject.duration ?: "Not available", color = TextSecondary, fontSize = 14.sp)
+                        if (!subject.year.isNullOrBlank() && subject.year != "Not available") {
+                            Text(subject.year, color = TextSecondary, fontSize = 14.sp)
+                        }
+                        if (!subject.duration.isNullOrBlank() && subject.duration != "Not available") {
+                            Text(subject.duration, color = TextSecondary, fontSize = 14.sp)
+                        }
                     }
 
                     Spacer(modifier = Modifier.height(12.dp))
@@ -348,7 +355,7 @@ fun DetailScreen(viewModel: MovieViewModel) {
                             Spacer(modifier = Modifier.width(8.dp))
                             Text("Stream Movie in High Definition", fontWeight = FontWeight.Bold, fontSize = 16.sp)
                         }
-                    } else {
+                    } else if (!viewModel.isAniFam) {
                         Text(
                             text = "Seasons",
                             fontSize = 18.sp,
@@ -383,42 +390,95 @@ fun DetailScreen(viewModel: MovieViewModel) {
 
             // TV Show Episodes List Section
             if (subject.isTvShow) {
-                items(viewModel.episodesList) { ep ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 20.dp, vertical = 6.dp)
-                            .clickable { viewModel.selectEpisode(ep) }
-                            .background(ObsidianCard, RoundedCornerShape(8.dp))
-                            .padding(10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        AsyncImage(
-                            model = ep.stillPath.ifEmpty { subject.poster },
-                            contentDescription = ep.title,
-                            contentScale = ContentScale.Crop, placeholder = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color.DarkGray), error = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color.DarkGray),
+                if (viewModel.isLoadingEpisodes) {
+                    item {
+                        Box(
                             modifier = Modifier
-                                .size(width = 80.dp, height = 50.dp)
-                                .clip(RoundedCornerShape(4.dp))
-                        )
-                        Spacer(modifier = Modifier.width(16.dp))
-                        Column(modifier = Modifier.weight(1f)) {
+                                .fillMaxWidth()
+                                .padding(vertical = 36.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(28.dp),
+                                    color = CinematicRed,
+                                    strokeWidth = 2.dp
+                                )
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Text(
+                                    text = "Loading episodes...",
+                                    color = TextSecondary,
+                                    fontSize = 13.sp
+                                )
+                            }
+                        }
+                    }
+                } else if (viewModel.episodesList.isEmpty()) {
+                    item {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 36.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
                             Text(
-                                text = "Episode ${ep.episodeNumber}",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = AccentAmber
-                            )
-                            Text(
-                                text = ep.title,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = TextPrimary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                                text = "No episodes available for this season",
+                                color = TextSecondary,
+                                fontSize = 14.sp
                             )
                         }
-                        Icon(Icons.Filled.PlayCircleFilled, contentDescription = "Play", tint = CinematicRed, modifier = Modifier.size(32.dp))
+                    }
+                } else {
+                    items(viewModel.episodesList) { ep ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 20.dp, vertical = 6.dp)
+                                .clickable { viewModel.selectEpisode(ep) }
+                                .background(ObsidianCard, RoundedCornerShape(8.dp))
+                                .padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            AsyncImage(
+                                model = ep.stillPath.ifEmpty { subject.poster },
+                                contentDescription = ep.title,
+                                contentScale = ContentScale.Crop, placeholder = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color.DarkGray), error = androidx.compose.ui.graphics.painter.ColorPainter(androidx.compose.ui.graphics.Color.DarkGray),
+                                modifier = Modifier
+                                    .size(width = 80.dp, height = 50.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                            )
+                            Spacer(modifier = Modifier.width(16.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Episode ${ep.episodeNumber}",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = AccentAmber
+                                )
+                                Text(
+                                    text = ep.title,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = TextPrimary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            val context = LocalContext.current
+                            IconButton(
+                                onClick = { viewModel.downloadSingleEpisode(context, subject, ep) },
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    Icons.Filled.Download,
+                                    contentDescription = "Download Episode",
+                                    tint = Color.White.copy(alpha = 0.85f),
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Icon(Icons.Filled.PlayCircleFilled, contentDescription = "Play", tint = CinematicRed, modifier = Modifier.size(32.dp))
+                        }
                     }
                 }
             }

@@ -41,8 +41,11 @@ class MainActivity : AppCompatActivity() {
             .retryOnConnectionFailure(true)
             .build()
 
-        // Configure high-performance Coil ImageLoader with instant Memory & Disk cache
+        // Configure high-performance Coil ImageLoader with instant Memory & Disk cache and SVG support
         val imageLoader = coil.ImageLoader.Builder(applicationContext)
+            .components {
+                add(coil.decode.SvgDecoder.Factory())
+            }
             .okHttpClient(imageOkHttpClient)
             .memoryCache {
                 coil.memory.MemoryCache.Builder(applicationContext)

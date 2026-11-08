@@ -18,8 +18,8 @@ android {
     applicationId = "com.anyfilm.app"
     minSdk = 24
     targetSdk = 36
-    versionCode = 7
-    versionName = "4.2"
+    versionCode = 8
+    versionName = "4.3"
   }
 
   val keystorePropertiesFile = rootProject.file("key.properties")
@@ -47,13 +47,18 @@ android {
 
   buildTypes {
     release {
-      isCrunchPngs = false
-      isMinifyEnabled = false
+      isCrunchPngs = true
+      isMinifyEnabled = true
+      isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       signingConfig = signingConfigs.getByName("release")
     }
     debug {
     }
+  }
+  lint {
+    checkReleaseBuilds = false
+    abortOnError = false
   }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
@@ -99,6 +104,7 @@ dependencies {
   implementation(libs.androidx.room.ktx)
   implementation(libs.androidx.room.runtime)
   implementation(libs.coil.compose)
+  implementation(libs.coil.svg)
   implementation(libs.converter.moshi)
   implementation(libs.firebase.ai)
   implementation(libs.firebase.appcheck.recaptcha)
