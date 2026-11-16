@@ -57,6 +57,15 @@ interface MovieBoxApi {
         @Query("pageSize") pageSize: Int
     ): HomeListResponse
 
+    @GET("wefeed-mobile-bff/tab/ranking-list")
+    suspend fun getRankingList(
+        @Query("tabId") tabId: Int = 2,
+        @Query("categoryType") categoryType: String = "all",
+        @Query("rankingListId") rankingListId: String? = null,
+        @Query("page") page: Int = 1,
+        @Query("perPage") perPage: Int = 100
+    ): HomeListResponse
+
     @POST("home/v2/get-list")
     suspend fun getList(
         @Body request: GetListRequest
@@ -180,6 +189,23 @@ class MovieBoxSignatureInterceptor(private val prefs: PreferencesManager) : Inte
                     .removeAllQueryParameters("ep")
                     .removeAllQueryParameters("quality")
                     .removeAllQueryParameters("resourceId")
+            } else if (fullPath.contains("wefeed-mobile-bff/tab/ranking-list") || fullPath.endsWith("ranking-list")) {
+                val tabId = originalUrl.queryParameter("tabId") ?: "2"
+                val categoryType = originalUrl.queryParameter("categoryType") ?: "all"
+                val rankingListId = originalUrl.queryParameter("rankingListId")
+                val page = originalUrl.queryParameter("page") ?: "1"
+                val perPage = originalUrl.queryParameter("perPage") ?: "100"
+
+                newUrlBuilder.encodedPath("/ranking-list")
+                    .setQueryParameter("tabId", tabId)
+                    .setQueryParameter("categoryType", categoryType)
+                    .setQueryParameter("page", page)
+                    .setQueryParameter("perPage", perPage)
+                    .apply {
+                        if (!rankingListId.isNullOrEmpty()) {
+                            setQueryParameter("rankingListId", rankingListId)
+                        }
+                    }
             } else if (fullPath.contains("wefeed-mobile-bff/subject-api/trending/v2") || fullPath.contains("trending")) {
                 newUrlBuilder.encodedPath("/trending")
                     .removeAllQueryParameters("page")

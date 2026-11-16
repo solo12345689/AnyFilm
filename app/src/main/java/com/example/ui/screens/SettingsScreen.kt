@@ -27,6 +27,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
 import com.example.R
 import com.example.ui.theme.*
@@ -50,10 +52,13 @@ fun SettingsScreen(
         history.groupBy { it.subjectId }.map { it.value.first() }
     }
 
-    LaunchedEffect(viewModel.isLoggedIn) {
+    LaunchedEffect(viewModel.isLoggedIn, viewModel.isAniFam) {
         if (viewModel.isLoggedIn) {
             viewModel.checkUserSession()
             showLoginForm = false
+            if (viewModel.isAniFam) {
+                viewModel.syncAniFamHistory()
+            }
         }
     }
 
@@ -188,9 +193,17 @@ fun SettingsScreen(
                                 },
                             contentAlignment = Alignment.Center
                         ) {
-                            val localAvatar = remember(user?.avatar) {
-                                val file = java.io.File(context.filesDir, "avatar.jpg")
-                                if (file.exists() && file.length() > 0) file else user?.avatar
+                            val localAvatar = remember(user?.avatar, viewModel.isAniFam) {
+                                if (viewModel.isAniFam) {
+                                    val file = java.io.File(context.filesDir, "anifam_avatar.jpg")
+                                    if (file.exists() && file.length() > 0) file else user?.avatar
+                                } else {
+                                    val file = java.io.File(context.filesDir, "moviebox_avatar.jpg")
+                                    val legacy = java.io.File(context.filesDir, "avatar.jpg")
+                                    if (file.exists() && file.length() > 0) file 
+                                    else if (legacy.exists() && legacy.length() > 0) legacy 
+                                    else user?.avatar
+                                }
                             }
                             if (viewModel.isLoggedIn && (!user?.avatar.isNullOrEmpty() || (localAvatar is java.io.File && localAvatar.exists()))) {
                                 AsyncImage(
@@ -517,48 +530,103 @@ fun SettingsScreen(
                             modifier = Modifier.padding(horizontal = 14.dp)
                         )
 
-                        // Location Selection Row
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { showLocationDialog = true }
-                                .padding(14.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Preferences: Watch Together (W2G) for AniFam, Location for MovieBox
+                        if (viewModel.isAniFam) {
+                            var showW2GScreen by remember { mutableStateOf(false) }
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        viewModel.loadPublicW2GRooms()
+                                        showW2GScreen = true
+                                    }
+                                    .padding(14.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Groups,
+                                        contentDescription = "Watch Together",
+                                        tint = TextPrimary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Column {
+                                        Text(
+                                            text = "Watch Together (W2G)",
+                                            fontSize = 15.sp,
+                                            color = TextPrimary,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                        Text(
+                                            text = "Browse live rooms & join party",
+                                            fontSize = 12.sp,
+                                            color = TextSecondary
+                                        )
+                                    }
+                                }
                                 Icon(
-                                    imageVector = Icons.Filled.LocationOn,
-                                    contentDescription = "Location",
-                                    tint = TextPrimary,
+                                    imageVector = Icons.Filled.ChevronRight,
+                                    contentDescription = "Navigate",
+                                    tint = TextSecondary,
                                     modifier = Modifier.size(18.dp)
                                 )
-                                Spacer(modifier = Modifier.width(12.dp))
-                                Column {
-                                    Text(
-                                        text = "Location",
-                                        fontSize = 15.sp,
-                                        color = TextPrimary,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                    Text(
-                                        text = when (viewModel.customCountryIso) {
-                                            "us" -> "United States"
-                                            "br" -> "Brazil"
-                                            "ru" -> "Russia"
-                                            else -> "India"
-                                        },
-                                        fontSize = 12.sp,
-                                        color = TextSecondary
-                                    )
-                                }
                             }
-                            Icon(
-                                imageVector = Icons.Filled.ChevronRight,
-                                contentDescription = "Navigate",
-                                tint = TextSecondary,
-                                modifier = Modifier.size(18.dp)
-                            )
+
+                            if (showW2GScreen) {
+                                WatchTogetherHubDialog(
+                                    viewModel = viewModel,
+                                    onDismiss = { showW2GScreen = false }
+                                )
+                            }
+                        } else {
+                            // Location Selection Row (MovieBox only)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { showLocationDialog = true }
+                                    .padding(14.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Filled.LocationOn,
+                                        contentDescription = "Location",
+                                        tint = TextPrimary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Column {
+                                        Text(
+                                            text = "Location",
+                                            fontSize = 15.sp,
+                                            color = TextPrimary,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                        Text(
+                                            text = when (viewModel.customCountryIso) {
+                                                "us" -> "United States"
+                                                "fr" -> "France"
+                                                "be" -> "Belgium"
+                                                "it" -> "Italy"
+                                                "br" -> "Brazil"
+                                                "ru" -> "Russia"
+                                                else -> "India"
+                                            },
+                                            fontSize = 12.sp,
+                                            color = TextSecondary
+                                        )
+                                    }
+                                }
+                                Icon(
+                                    imageVector = Icons.Filled.ChevronRight,
+                                    contentDescription = "Navigate",
+                                    tint = TextSecondary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
                         }
 
                         HorizontalDivider(
@@ -716,8 +784,8 @@ fun SettingsScreen(
                                     )
                                     val appVersion = remember {
                                         try {
-                                            context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "4.3"
-                                        } catch (e: Exception) { "4.3" }
+                                            context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "4.4"
+                                        } catch (e: Exception) { "4.4" }
                                     }
                                     Text(
                                         text = if (viewModel.isCheckingUpdate) "Checking latest version..." else "Current: v$appVersion",
@@ -809,8 +877,11 @@ fun SettingsScreen(
                         text = {
                             Column {
                                 val regions = listOf(
-                                    Triple("90101", "us", "United States"),
                                     Triple("40401", "in", "India"),
+                                    Triple("90101", "us", "United States"),
+                                    Triple("20801", "fr", "France"),
+                                    Triple("20601", "be", "Belgium"),
+                                    Triple("22201", "it", "Italy"),
                                     Triple("72402", "br", "Brazil"),
                                     Triple("25001", "ru", "Russia")
                                 )
@@ -878,6 +949,350 @@ fun SettingsScreen(
             }
         } else {
             AuthSheet(viewModel = viewModel, onDismiss = { showLoginForm = false })
+        }
+    }
+}
+
+@Composable
+fun WatchTogetherHubDialog(
+    viewModel: MovieViewModel,
+    onDismiss: () -> Unit
+) {
+    var showJoinCodeDialog by remember { mutableStateOf(false) }
+    var showAuthSheet by remember { mutableStateOf(false) }
+    var inputCode by remember { mutableStateOf("") }
+    var joinError by remember { mutableStateOf<String?>(null) }
+    var isJoining by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    LaunchedEffect(viewModel.isLoggedIn) {
+        if (viewModel.isLoggedIn) {
+            showAuthSheet = false
+        }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = ObsidianDark
+        ) {
+            Scaffold(
+                containerColor = ObsidianDark,
+                topBar = {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .statusBarsPadding()
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(onClick = onDismiss) {
+                                Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = TextPrimary)
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    text = "Watch Together",
+                                    fontSize = 20.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextPrimary
+                                )
+                                Text(
+                                    text = "Live anime parties",
+                                    fontSize = 12.sp,
+                                    color = TextSecondary
+                                )
+                            }
+                        }
+
+                        // '+' Button requested by user to enter room code!
+                        IconButton(
+                            onClick = {
+                                if (!viewModel.isLoggedIn) {
+                                    showAuthSheet = true
+                                    return@IconButton
+                                }
+                                inputCode = ""
+                                joinError = null
+                                showJoinCodeDialog = true
+                            },
+                            modifier = Modifier
+                                .background(CinematicRed, CircleShape)
+                                .size(40.dp)
+                        ) {
+                            Icon(Icons.Filled.Add, contentDescription = "Add Room Code", tint = Color.White)
+                        }
+                    }
+                }
+            ) { padding ->
+                Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+                    if (viewModel.isLoadingW2GRooms) {
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(color = CinematicRed)
+                        }
+                    } else if (viewModel.w2gPublicRooms.isEmpty()) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(32.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                Icons.Filled.Groups,
+                                contentDescription = null,
+                                tint = TextSecondary.copy(alpha = 0.5f),
+                                modifier = Modifier.size(64.dp)
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = "No Public Rooms Streaming",
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Tap the + button above to join with a code, or create your own room from the watch page!",
+                                fontSize = 13.sp,
+                                color = TextSecondary,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    } else {
+                        androidx.compose.foundation.lazy.LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            item {
+                                Text(
+                                    text = "PUBLIC LIVE ROOMS (${viewModel.w2gPublicRooms.size})",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextSecondary.copy(alpha = 0.8f),
+                                    letterSpacing = 1.sp,
+                                    modifier = Modifier.padding(bottom = 4.dp)
+                                )
+                            }
+                            items(viewModel.w2gPublicRooms, key = { it.public_id }) { room ->
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            if (!viewModel.isLoggedIn) {
+                                                showAuthSheet = true
+                                                return@clickable
+                                            }
+                                            viewModel.joinW2GRoomByCode(
+                                                code = room.public_id,
+                                                onSuccess = { onDismiss() },
+                                                onError = { err -> Toast.makeText(context, err, Toast.LENGTH_SHORT).show() }
+                                            )
+                                        },
+                                    colors = CardDefaults.cardColors(containerColor = ObsidianCard),
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(12.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        val posterUrl = room.anime?.fullPosterUrl ?: ""
+                                        AsyncImage(
+                                            model = posterUrl,
+                                            contentDescription = room.name,
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier
+                                                .size(width = 60.dp, height = 85.dp)
+                                                .clip(RoundedCornerShape(8.dp))
+                                        )
+
+                                        Spacer(modifier = Modifier.width(14.dp))
+
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = room.anime?.displayName ?: room.name ?: "Anime Room",
+                                                fontSize = 15.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = TextPrimary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+
+                                            Spacer(modifier = Modifier.height(4.dp))
+
+                                            Text(
+                                                text = "Episode ${room.episode?.episodeNumber ?: 1} • Host: ${room.host?.name ?: "Host"}",
+                                                fontSize = 12.sp,
+                                                color = TextSecondary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+
+                                            Spacer(modifier = Modifier.height(8.dp))
+
+                                            Row(
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Surface(
+                                                    color = CinematicRed.copy(alpha = 0.2f),
+                                                    shape = RoundedCornerShape(4.dp)
+                                                ) {
+                                                    Text(
+                                                        text = "🔴 LIVE",
+                                                        fontSize = 10.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = CinematicRed,
+                                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                    )
+                                                }
+
+                                                Surface(
+                                                    color = Color.White.copy(alpha = 0.1f),
+                                                    shape = RoundedCornerShape(4.dp)
+                                                ) {
+                                                    Text(
+                                                        text = (room.track ?: "SUB").uppercase(),
+                                                        fontSize = 10.sp,
+                                                        fontWeight = FontWeight.SemiBold,
+                                                        color = TextPrimary,
+                                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                    )
+                                                }
+
+                                                Text(
+                                                    text = "👥 ${room.members ?: 1}",
+                                                    fontSize = 11.sp,
+                                                    color = TextSecondary
+                                                )
+                                            }
+                                        }
+
+                                        Icon(
+                                            Icons.Filled.ChevronRight,
+                                            contentDescription = "Join",
+                                            tint = TextSecondary,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (showJoinCodeDialog) {
+                        AlertDialog(
+                            onDismissRequest = { showJoinCodeDialog = false },
+                            containerColor = ObsidianCard,
+                            title = {
+                                Text(
+                                    text = "Join Watch Party",
+                                    color = TextPrimary,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 18.sp
+                                )
+                            },
+                            text = {
+                                Column {
+                                    Text(
+                                        text = "Enter your friend's 12-character room code:",
+                                        color = TextSecondary,
+                                        fontSize = 13.sp
+                                    )
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    OutlinedTextField(
+                                        value = inputCode,
+                                        onValueChange = { inputCode = it },
+                                        placeholder = { Text("e.g. xnqlrpw9x1aa", color = TextSecondary.copy(alpha = 0.5f)) },
+                                        singleLine = true,
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedBorderColor = CinematicRed,
+                                            unfocusedBorderColor = Color.White.copy(alpha = 0.2f),
+                                            focusedTextColor = TextPrimary,
+                                            unfocusedTextColor = TextPrimary
+                                        ),
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    if (joinError != null) {
+                                        Spacer(modifier = Modifier.height(6.dp))
+                                        Text(text = joinError!!, color = Color(0xFFEF4444), fontSize = 12.sp)
+                                    }
+                                }
+                            },
+                            confirmButton = {
+                                Button(
+                                    onClick = {
+                                        val code = inputCode.trim()
+                                        if (code.isEmpty()) {
+                                            joinError = "Please enter room code"
+                                            return@Button
+                                        }
+                                        isJoining = true
+                                        viewModel.joinW2GRoomByCode(
+                                            code = code,
+                                            onSuccess = {
+                                                isJoining = false
+                                                showJoinCodeDialog = false
+                                                onDismiss()
+                                            },
+                                            onError = { err ->
+                                                isJoining = false
+                                                joinError = err
+                                            }
+                                        )
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = CinematicRed),
+                                    enabled = !isJoining
+                                ) {
+                                    if (isJoining) {
+                                        CircularProgressIndicator(color = Color.White, modifier = Modifier.size(16.dp))
+                                    } else {
+                                        Text("Join", fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { showJoinCodeDialog = false }) {
+                                    Text("Cancel", color = TextSecondary)
+                                }
+                            }
+                        )
+                    }
+
+                    if (showAuthSheet) {
+                        Dialog(
+                            onDismissRequest = { showAuthSheet = false },
+                            properties = DialogProperties(usePlatformDefaultWidth = false)
+                        ) {
+                            Surface(
+                                modifier = Modifier.fillMaxSize(),
+                                color = ObsidianDark
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .statusBarsPadding()
+                                        .navigationBarsPadding()
+                                        .padding(16.dp)
+                                ) {
+                                    AuthSheet(
+                                        viewModel = viewModel,
+                                        onDismiss = { showAuthSheet = false }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

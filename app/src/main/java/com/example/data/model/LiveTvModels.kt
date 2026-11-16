@@ -16,7 +16,11 @@ data class UnifiedChannel(
     val logo: String? = null,
     val category: String = "General",
     val streamUrl: String = "",
-    val isJioTv: Boolean = false
+    val isJioTv: Boolean = false,
+    val directKeyId: String? = null,
+    val directKey: String? = null,
+    val directCookie: String? = null,
+    val isDirectWorker: Boolean = false
 )
 
 @JsonClass(generateAdapter = true)
@@ -47,6 +51,19 @@ data class LiveDrmInfo(
     @Json(name = "keyId") val keyId: String? = null,
     @Json(name = "key") val key: String? = null,
     @Json(name = "clearKeys") val clearKeys: Map<String, String>? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class ManishWorkerChannelItem(
+    @Json(name = "id") val id: String? = null,
+    @Json(name = "name") val name: String? = null,
+    @Json(name = "logo") val logo: String? = null,
+    @Json(name = "category") val category: String? = null,
+    @Json(name = "cat") val cat: String? = null,
+    @Json(name = "url") val url: String? = null,
+    @Json(name = "keyId") val keyId: String? = null,
+    @Json(name = "key") val key: String? = null,
+    @Json(name = "cookie") val cookie: String? = null
 )
 
 @JsonClass(generateAdapter = true)

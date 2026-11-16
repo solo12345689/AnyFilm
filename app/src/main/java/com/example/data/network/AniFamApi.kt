@@ -21,7 +21,8 @@ interface AniFamApi {
     suspend fun browse(
         @Query("genre") genre: String? = null,
         @Query("type") type: String? = null,
-        @Query("sort") sort: String? = "popular",
+        @Query("sort") sort: String? = null,
+        @Query("status") status: String? = null,
         @Query("page") page: Int = 1
     ): AniFamBrowseResponse
 
@@ -102,6 +103,76 @@ interface AniFamApi {
     suspend fun removeFromWatchlist(
         @Path("id") animeId: Int
     ): retrofit2.Response<Unit>
+
+    // ==================== Continue Watching & Progress Sync ====================
+
+    @GET("api/v1/app/me/continue-watching")
+    suspend fun getContinueWatching(
+        @Query("page") page: Int = 1
+    ): AniFamContinueWatchingResponse
+
+    @POST("api/v1/app/me/progress")
+    suspend fun syncProgress(
+        @Body request: AniFamProgressRequest
+    ): Map<String, @JvmSuppressWildcards Any?>
+
+    @DELETE("api/v1/app/me/continue-watching/{id}")
+    suspend fun deleteContinueWatching(
+        @Path("id") id: Int
+    ): retrofit2.Response<Unit>
+
+    // ==================== W2G Endpoints ====================
+
+    @GET("api/v1/app/w2g/rooms")
+    suspend fun getW2GRooms(
+        @Query("tab") tab: String = "on_air",
+        @Query("page") page: Int = 1
+    ): W2GRoomListResponse
+
+    @GET("api/v1/app/w2g/rooms/mine")
+    suspend fun getMineW2GRoom(): W2GMineResponse
+
+    @GET("api/v1/app/w2g/rooms/{id}")
+    suspend fun getW2GRoomDetail(
+        @Path("id") roomId: String
+    ): W2GRoomDetail
+
+    @POST("api/v1/app/w2g/rooms")
+    suspend fun createW2GRoom(
+        @Body body: Map<String, @JvmSuppressWildcards Any>
+    ): W2GRoomDetail
+
+    @POST("api/v1/app/w2g/rooms/{id}/join")
+    suspend fun joinW2GRoom(
+        @Path("id") roomId: String
+    ): W2GRoomDetail
+
+    @POST("api/v1/app/w2g/rooms/{id}/start")
+    suspend fun startW2GRoom(
+        @Path("id") roomId: String
+    ): Map<String, @JvmSuppressWildcards Any?>
+
+    @POST("api/v1/app/w2g/rooms/{id}/sync")
+    suspend fun syncW2GRoom(
+        @Path("id") roomId: String,
+        @Body body: Map<String, @JvmSuppressWildcards Any>
+    ): Map<String, @JvmSuppressWildcards Any?>
+
+    @POST("api/v1/app/w2g/rooms/{id}/messages")
+    suspend fun sendW2GMessage(
+        @Path("id") roomId: String,
+        @Body body: Map<String, String>
+    ): W2GMessage
+
+    @POST("api/v1/app/w2g/rooms/{id}/leave")
+    suspend fun leaveW2GRoom(
+        @Path("id") roomId: String
+    ): retrofit2.Response<Unit>
+
+    @POST("api/v1/app/w2g/rooms/{id}/end")
+    suspend fun endW2GRoom(
+        @Path("id") roomId: String
+    ): Map<String, @JvmSuppressWildcards Any?>
 }
 
 object AniFamRetrofitClient {

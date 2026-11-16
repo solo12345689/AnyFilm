@@ -63,6 +63,7 @@ import com.example.ui.viewmodel.ActiveDownload
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
@@ -79,9 +80,36 @@ import android.widget.Toast
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
+import kotlin.math.roundToInt
 
 
-fun downloadVideo(context: android.content.Context, url: String, title: String, posterUrl: String = "", showToast: Boolean = true) {
+object PosterDownloadTracker {
+    val downloadingOrDownloadedShows: MutableSet<String> = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+
+    fun shouldDownload(showPrefix: String): Boolean {
+        if (showPrefix.isBlank()) return false
+        return downloadingOrDownloadedShows.add(showPrefix)
+    }
+
+    fun markFailed(showPrefix: String) {
+        downloadingOrDownloadedShows.remove(showPrefix)
+    }
+}
+
+fun downloadVideo(
+    context: android.content.Context,
+    url: String,
+    title: String,
+    posterUrl: String = "",
+    showToast: Boolean = true,
+    safeShowPrefixOverride: String? = null,
+    subtitles: List<com.example.data.model.SubtitleItem> = emptyList()
+) {
     val postToast: (String) -> Unit = { msg ->
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             try {
@@ -97,66 +125,127 @@ fun downloadVideo(context: android.content.Context, url: String, title: String, 
     try {
         val safeTitle = title.replace(Regex("[^a-zA-Z0-9.-]"), "_")
         val manager = context.getSystemService(android.content.Context.DOWNLOAD_SERVICE) as android.app.DownloadManager
-        
-        if (posterUrl.isNotEmpty()) {
-            val safeShowName = Regex("(.*?)(_S\\d+E\\d+.*|$)").find(safeTitle)?.groupValues?.get(1)?.trim() ?: safeTitle
 
-            // 1. Instant Direct HTTP download (saves in 1-2 seconds)
-            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
-                try {
-                    val anyFilmDir = java.io.File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES), "AnyFilm")
-                    if (!anyFilmDir.exists()) anyFilmDir.mkdirs()
-                    val titlePoster = java.io.File(anyFilmDir, "$safeTitle.jpg")
-                    val showPoster = if (safeShowName.isNotEmpty() && safeShowName != safeTitle) java.io.File(anyFilmDir, "$safeShowName.jpg") else null
-
-                    val conn = (java.net.URL(posterUrl).openConnection() as java.net.HttpURLConnection).apply {
-                        connectTimeout = 6000
-                        readTimeout = 6000
-                        instanceFollowRedirects = true
-                        setRequestProperty("User-Agent", "okhttp/4.12.0")
-                        setRequestProperty("accept", "image/webp,image/apng,image/*,*/*;q=0.8")
-                    }
-                    if (conn.responseCode in 200..299) {
-                        val bytes = conn.inputStream.use { it.readBytes() }
-                        if (bytes.isNotEmpty()) {
-                            if (!titlePoster.exists()) titlePoster.writeBytes(bytes)
-                            if (showPoster != null && !showPoster.exists()) showPoster.writeBytes(bytes)
-                        }
-                    }
-                } catch (e: Exception) { }
-            }
-
-            // 2. Also register in DownloadManager as system fallback
-            try {
-                val posterRequest = android.app.DownloadManager.Request(android.net.Uri.parse(posterUrl))
-                posterRequest.setTitle("$title Poster")
-                posterRequest.setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_HIDDEN)
-                posterRequest.setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_MOVIES, "AnyFilm/$safeTitle.jpg")
-                manager.enqueue(posterRequest)
-
-                if (safeShowName.isNotEmpty() && safeShowName != safeTitle) {
-                    val showPosterFile = java.io.File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES), "AnyFilm/$safeShowName.jpg")
-                    if (!showPosterFile.exists()) {
-                        val showPosterRequest = android.app.DownloadManager.Request(android.net.Uri.parse(posterUrl))
-                        showPosterRequest.setTitle("$safeShowName Poster")
-                        showPosterRequest.setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_HIDDEN)
-                        showPosterRequest.setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_MOVIES, "AnyFilm/$safeShowName.jpg")
-                        manager.enqueue(showPosterRequest)
-                    }
-                }
-            } catch (e: Exception) { }
-        }
+        val safeShowName = safeShowPrefixOverride?.ifBlank { null }
+            ?: Regex("(?i)(.*?)(?:[\\s._-]*S\\d+E\\d+.*|$)").find(title)?.groupValues?.get(1)?.trim()?.ifEmpty { null }
+            ?: Regex("(.*?)(_S\\d+E\\d+.*|$)").find(safeTitle)?.groupValues?.get(1)?.replace("_", " ")?.trim()
+            ?: safeTitle
+        val safeShowPrefix = safeShowName.replace(Regex("[^a-zA-Z0-9.-]"), "_")
 
         val moviesDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES)
         val anyFilmDir = java.io.File(moviesDir, "AnyFilm")
-        if (!anyFilmDir.exists()) anyFilmDir.mkdirs()
+        val showDir = java.io.File(anyFilmDir, safeShowPrefix)
+        if (!showDir.exists()) showDir.mkdirs()
+        val epDir = java.io.File(showDir, safeTitle)
+        if (!epDir.exists()) epDir.mkdirs()
+
+        // 1. Download show poster ONLY ONCE into showDir/poster.jpg
+        if (posterUrl.isNotEmpty()) {
+            val showPoster = java.io.File(showDir, "poster.jpg")
+            val namedPoster = java.io.File(showDir, "$safeShowPrefix.jpg")
+            if (!showPoster.exists() && PosterDownloadTracker.shouldDownload(safeShowPrefix)) {
+                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                    try {
+                        val referer = when {
+                            posterUrl.contains("anifam", ignoreCase = true) -> "https://anifam.net/"
+                            posterUrl.contains("tmdb.org", ignoreCase = true) -> "https://www.themoviedb.org/"
+                            else -> "https://moviebox.ph/"
+                        }
+                        val client = okhttp3.OkHttpClient.Builder()
+                            .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                            .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                            .followRedirects(true)
+                            .build()
+                        val req = okhttp3.Request.Builder()
+                            .url(posterUrl)
+                            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+                            .header("Referer", referer)
+                            .header("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+                            .build()
+                        client.newCall(req).execute().use { resp ->
+                            if (resp.isSuccessful) {
+                                val bytes = resp.body?.bytes()
+                                if (bytes != null && bytes.isNotEmpty()) {
+                                    if (!showPoster.exists()) showPoster.writeBytes(bytes)
+                                    try { if (!namedPoster.exists()) namedPoster.writeBytes(bytes) } catch (_: Throwable) {}
+                                }
+                            } else {
+                                PosterDownloadTracker.markFailed(safeShowPrefix)
+                            }
+                        }
+                    } catch (_: Exception) {
+                        PosterDownloadTracker.markFailed(safeShowPrefix)
+                    }
+                }
+            }
+        }
+
+        // 2. Download all subtitles into epDir
+        if (subtitles.isNotEmpty()) {
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                val client = okhttp3.OkHttpClient.Builder()
+                    .connectTimeout(12, java.util.concurrent.TimeUnit.SECONDS)
+                    .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                    .followRedirects(true)
+                    .build()
+                val subArray = org.json.JSONArray()
+                val usedNames = mutableSetOf<String>()
+
+                for ((index, sub) in subtitles.withIndex()) {
+                    try {
+                        if (sub.url.isBlank()) continue
+                        val ext = if (sub.url.contains(".vtt", ignoreCase = true) || sub.format.equals("vtt", ignoreCase = true)) "vtt" else "srt"
+                        val rawLang = sub.language.trim().ifBlank { "Track ${index + 1}" }
+                        val safeLang = rawLang.replace(Regex("[/\\\\:*?\"<>|]"), " ").replace(Regex("\\s+"), " ").trim()
+                        var fileName = "$safeLang.$ext"
+                        var counter = 2
+                        while (usedNames.contains(fileName.lowercase())) {
+                            fileName = "$safeLang ($counter).$ext"
+                            counter++
+                        }
+                        usedNames.add(fileName.lowercase())
+                        val subFile = java.io.File(epDir, fileName)
+
+                        if (!subFile.exists() || subFile.length() == 0L) {
+                            val referer = if (sub.url.contains("anifam")) "https://anifam.net/" else "https://moviebox.ph/"
+                            val req = okhttp3.Request.Builder()
+                                .url(sub.url)
+                                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+                                .header("Referer", referer)
+                                .build()
+                            client.newCall(req).execute().use { resp ->
+                                if (resp.isSuccessful) {
+                                    val bytes = resp.body?.bytes()
+                                    if (bytes != null && bytes.isNotEmpty()) {
+                                        subFile.writeBytes(bytes)
+                                    }
+                                }
+                            }
+                        }
+
+                        if (subFile.exists() && subFile.length() > 0) {
+                            val item = org.json.JSONObject()
+                            item.put("language", rawLang)
+                            item.put("fileName", fileName)
+                            subArray.put(item)
+                        }
+                    } catch (_: Throwable) {}
+                }
+                if (subArray.length() > 0) {
+                    try {
+                        val jsonFile = java.io.File(epDir, "subtitles.json")
+                        jsonFile.writeText(subArray.toString())
+                    } catch (_: Exception) {}
+                }
+            }
+        }
 
         val request = android.app.DownloadManager.Request(android.net.Uri.parse(url))
         val fileName = "$safeTitle.mp4"
         request.setTitle(title)
         request.setDescription("Downloading...")
         request.setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-        request.setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_MOVIES, "AnyFilm/$fileName")
+        request.setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_MOVIES, "AnyFilm/$safeShowPrefix/$safeTitle/$fileName")
         manager.enqueue(request)
         if (showToast) {
             postToast("Download started...")
@@ -179,22 +268,44 @@ fun loadMediaOnCast(
     try {
         val remoteMediaClient = castSession.remoteMediaClient ?: return
 
-        // Prefer H.264 / universally compatible stream for Google Cast if available in playInfo
-        val availableStreams = viewModel.playInfo?.streamList ?: emptyList()
-        val preferredStream = availableStreams.find { s ->
-            val u = s.url.lowercase()
-            u.isNotEmpty() && !u.contains("b164fbfb43477929") && !u.contains("/h265/") && !u.contains("h265") && !u.contains("hevc")
-        } ?: viewModel.selectedStream
+        val isAniFam = viewModel.isAniFam ||
+                streamUrl.contains("zokoanime", ignoreCase = true) ||
+                streamUrl.contains("dramahot", ignoreCase = true) ||
+                streamUrl.contains("megaplay", ignoreCase = true) ||
+                streamUrl.contains("shiora", ignoreCase = true) ||
+                streamUrl.contains("embermeadow", ignoreCase = true) ||
+                streamUrl.contains("laggedduringcutscene", ignoreCase = true) ||
+                streamUrl.contains("anipixcdn", ignoreCase = true)
 
-        val rawTargetUrl = preferredStream?.url?.ifEmpty { streamUrl } ?: streamUrl
-        val targetCookie = preferredStream?.cookie ?: viewModel.selectedStream?.cookie ?: ""
+        val streamToCast = if (isAniFam) {
+            viewModel.selectedStream ?: viewModel.playInfo?.streamList?.firstOrNull()
+        } else {
+            val availableStreams = viewModel.playInfo?.streamList ?: emptyList()
+            availableStreams.find { s ->
+                val u = s.url.lowercase()
+                u.isNotEmpty() && !u.contains("b164fbfb43477929") && !u.contains("/h265/") && !u.contains("h265") && !u.contains("hevc")
+            } ?: viewModel.selectedStream
+        }
+
+        val rawTargetUrl = streamToCast?.url?.ifEmpty { streamUrl } ?: streamUrl
+        val targetCookie = streamToCast?.cookie ?: viewModel.selectedStream?.cookie ?: ""
+
+        val effectiveIsAniFam = isAniFam ||
+                rawTargetUrl.contains("zokoanime", ignoreCase = true) ||
+                rawTargetUrl.contains("dramahot", ignoreCase = true) ||
+                rawTargetUrl.contains("megaplay", ignoreCase = true) ||
+                rawTargetUrl.contains("shiora", ignoreCase = true) ||
+                rawTargetUrl.contains("embermeadow", ignoreCase = true) ||
+                rawTargetUrl.contains("laggedduringcutscene", ignoreCase = true) ||
+                rawTargetUrl.contains("anipixcdn", ignoreCase = true)
 
         // Resolve phone's LAN IP address for Cast receiver
         val wifiIp = com.example.cast.CastForegroundService.getWifiIpAddress()
         val castUrl = if (wifiIp != "127.0.0.1") {
             val encodedTarget = java.net.URLEncoder.encode(rawTargetUrl, "UTF-8")
             val encodedCookie = java.net.URLEncoder.encode(targetCookie, "UTF-8")
-            "http://$wifiIp:3000/cast-proxy?url=$encodedTarget&cookie=$encodedCookie"
+            val aniFamParam = if (effectiveIsAniFam) "&isAniFam=true" else ""
+            "http://$wifiIp:3000/cast-proxy?url=$encodedTarget&cookie=$encodedCookie$aniFamParam"
         } else {
             rawTargetUrl
         }
@@ -246,13 +357,17 @@ fun loadMediaOnCast(
             .setPlayPosition(startPosition)
             .build()
 
+        val mediaTitle = if (subject.isTvShow) "${subject.name} S${viewModel.selectedSeason}E${viewModel.currentEpisode?.episodeNumber ?: 1}" else subject.name
+        if (context != null) {
+            com.example.cast.CastForegroundService.start(context, mediaTitle)
+        }
+
         android.util.Log.i("MovieScreens", "Loading media on Cast: url=$castUrl mimeType=$mimeType pos=$startPosition")
         val pendingResult = remoteMediaClient.load(mediaInfo, loadOptions)
         pendingResult.setResultCallback { result ->
             if (result.status.isSuccess) {
                 android.util.Log.i("MovieScreens", "Cast media load command acknowledged successfully")
                 if (context != null) {
-                    val mediaTitle = if (subject.isTvShow) "${subject.name} S${viewModel.selectedSeason}E${viewModel.currentEpisode?.episodeNumber ?: 1}" else subject.name
                     com.example.cast.CastForegroundService.start(context, mediaTitle)
                 }
             } else {
@@ -1231,6 +1346,7 @@ fun MainContent(viewModel: MovieViewModel) {
             if (file != null) {
                 OfflinePlayerScreen(
                     fileToPlay = file,
+                    viewModel = viewModel,
                     onDismiss = { viewModel.playingDownloadedFile = null }
                 )
             }
@@ -1902,9 +2018,16 @@ fun WatchlistScreen(viewModel: MovieViewModel, onBack: () -> Unit = {}) {
                             val subjectId = if (viewModel.isAniFam) {
                                 if (movie.id.startsWith("anifam_")) movie.id else "anifam_${movie.id}"
                             } else {
-                                movie.id
+                                movie.id.removePrefix("moviebox_")
                             }
-                            val subject = MovieSubject(id = subjectId, name = movie.name, poster = movie.poster)
+                            val subject = MovieSubject(
+                                id = subjectId,
+                                name = movie.name,
+                                poster = movie.poster,
+                                isTvShow = movie.isTvShow,
+                                rating = movie.rating,
+                                year = movie.year
+                            )
                             viewModel.toggleFavorite(subject)
                         }) {
                             Icon(Icons.Filled.BookmarkRemove, contentDescription = "Remove", tint = CinematicRed)
@@ -1921,8 +2044,10 @@ fun HistoryScreen(viewModel: MovieViewModel, onBack: () -> Unit = {}) {
     val history by viewModel.historyList.collectAsState()
     var expandedSubjectId by remember { mutableStateOf<String?>(null) }
 
-    val groupedHistory = remember(history) {
-        history.groupBy { it.subjectId }.map { entry ->
+    val groupedHistory = remember(history, viewModel.isAniFam) {
+        history.groupBy { 
+            if (viewModel.isAniFam) it.subjectId.removePrefix("anifam_") else it.subjectId 
+        }.map { entry ->
             entry.value.first() to entry.value
         }
     }
@@ -1961,7 +2086,8 @@ fun HistoryScreen(viewModel: MovieViewModel, onBack: () -> Unit = {}) {
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 items(groupedHistory) { (item, episodesList) ->
-                    val isExpanded = expandedSubjectId == item.subjectId
+                    val groupKey = if (viewModel.isAniFam) item.subjectId.removePrefix("anifam_") else item.subjectId
+                    val isExpanded = expandedSubjectId == groupKey
 
                     Column(
                         modifier = Modifier
@@ -1974,7 +2100,7 @@ fun HistoryScreen(viewModel: MovieViewModel, onBack: () -> Unit = {}) {
                                 .fillMaxWidth()
                                 .clickable {
                                     if (item.isTvShow) {
-                                        expandedSubjectId = if (isExpanded) null else item.subjectId
+                                        expandedSubjectId = if (isExpanded) null else groupKey
                                     } else {
                                         // Movie: play directly
                                         val subject = MovieSubject(
@@ -2025,7 +2151,7 @@ fun HistoryScreen(viewModel: MovieViewModel, onBack: () -> Unit = {}) {
                                 }
                             }
                             IconButton(onClick = {
-                                episodesList.forEach { viewModel.deleteHistoryItem(it.id) }
+                                viewModel.deleteHistoryForSubject(item.subjectId, episodesList)
                             }) {
                                 Icon(Icons.Filled.DeleteOutline, contentDescription = "Delete All", tint = TextSecondary)
                             }
@@ -2245,6 +2371,303 @@ fun LabScreen(viewModel: MovieViewModel) {
     }
 }
 
+fun formatPreviewTime(ms: Long): String {
+    val totalSec = maxOf(0L, ms / 1000L)
+    val hrs = totalSec / 3600
+    val mins = (totalSec % 3600) / 60
+    val secs = totalSec % 60
+    return if (hrs > 0) {
+        String.format("%d:%02d:%02d", hrs, mins, secs)
+    } else {
+        String.format("%d:%02d", mins, secs)
+    }
+}
+
+@Composable
+fun SeekPreviewPopup(
+    seekMs: Long,
+    fraction: Float,
+    previewPlayer: androidx.media3.exoplayer.ExoPlayer? = null,
+    previewSource: Any? = null,
+    modifier: Modifier = Modifier
+) {
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val previewWidthDp = 136.dp
+    val previewHeightDp = 76.dp
+    val previewWidthPx = with(density) { previewWidthDp.toPx() }
+    val timeBadgeWidthDp = 64.dp
+    val timeBadgeWidthPx = with(density) { timeBadgeWidthDp.toPx() }
+    var containerWidthPx by remember { mutableStateOf(0f) }
+
+    // Live real-time seeking for preview player
+    var lastSeekTriggerTime by remember { mutableStateOf(0L) }
+    LaunchedEffect(seekMs, previewPlayer) {
+        if (previewPlayer != null) {
+            val now = android.os.SystemClock.uptimeMillis()
+            if (now - lastSeekTriggerTime > 60L) {
+                lastSeekTriggerTime = now
+                previewPlayer.seekTo(seekMs)
+            } else {
+                kotlinx.coroutines.delay(60L)
+                lastSeekTriggerTime = android.os.SystemClock.uptimeMillis()
+                previewPlayer.seekTo(seekMs)
+            }
+        }
+    }
+
+    // Offline bitmap extraction fallback (for local File)
+    val retrieverState = produceState<android.media.MediaMetadataRetriever?>(initialValue = null, key1 = previewSource) {
+        value = withContext(kotlinx.coroutines.Dispatchers.IO) {
+            when (previewSource) {
+                is java.io.File -> {
+                    if (previewSource.exists()) {
+                        try {
+                            val r = android.media.MediaMetadataRetriever()
+                            r.setDataSource(previewSource.absolutePath)
+                            r
+                        } catch (_: Throwable) { null }
+                    } else null
+                }
+                else -> null
+            }
+        }
+    }
+    val retriever = retrieverState.value
+
+    DisposableEffect(retriever) {
+        onDispose {
+            try { retriever?.release() } catch (_: Throwable) {}
+        }
+    }
+
+    val frameCache = remember { android.util.LruCache<Long, android.graphics.Bitmap>(30) }
+    var previewBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+
+    val roundedBucket = (seekMs / 1000L) * 1000L
+    LaunchedEffect(roundedBucket, retriever) {
+        if (retriever != null) {
+            val cached = frameCache.get(roundedBucket)
+            if (cached != null) {
+                previewBitmap = cached
+            } else {
+                withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    try {
+                        val timeUs = maxOf(1000L, seekMs * 1000L)
+                        val bmp = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1) {
+                            retriever.getScaledFrameAtTime(
+                                timeUs,
+                                android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                                280,
+                                158
+                            )
+                        } else {
+                            retriever.getFrameAtTime(timeUs, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                        }
+                        if (bmp != null) {
+                            frameCache.put(roundedBucket, bmp)
+                            withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                previewBitmap = bmp
+                            }
+                        }
+                    } catch (_: Throwable) {}
+                }
+            }
+        }
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(bottom = 6.dp)
+            .onGloballyPositioned { coordinates ->
+                containerWidthPx = coordinates.size.width.toFloat()
+            }
+    ) {
+        val effectiveWidth = if (containerWidthPx > 0f) containerWidthPx else with(density) { 360.dp.toPx() }
+        val thumbX = effectiveWidth * fraction.coerceIn(0f, 1f)
+        val hasPreview = (previewPlayer != null || previewBitmap != null)
+        val popupWidthPx = if (hasPreview) previewWidthPx else timeBadgeWidthPx
+        val halfWidth = popupWidthPx / 2f
+        val rawX = thumbX - halfWidth
+        val clampedX = if (effectiveWidth > popupWidthPx) {
+            rawX.coerceIn(0f, effectiveWidth - popupWidthPx)
+        } else {
+            0f
+        }
+
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier
+                .offset { androidx.compose.ui.unit.IntOffset(clampedX.roundToInt(), 0) }
+        ) {
+            // 1. Thumbnail Card (16:9) using TextureView preview_card_player_view
+            if (hasPreview) {
+                Box(
+                    modifier = Modifier
+                        .size(previewWidthDp, previewHeightDp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFF16161A))
+                        .border(1.5.dp, Color.White.copy(alpha = 0.9f), RoundedCornerShape(8.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (previewBitmap != null) {
+                        Image(
+                            bitmap = previewBitmap!!.asImageBitmap(),
+                            contentDescription = "Seek Frame",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+
+                    if (previewPlayer != null) {
+                        AndroidView(
+                            factory = { ctx ->
+                                val view = android.view.LayoutInflater.from(ctx)
+                                    .inflate(com.example.R.layout.preview_card_player_view, null) as androidx.media3.ui.PlayerView
+                                view.player = previewPlayer
+                                view
+                            },
+                            update = { view ->
+                                if (view.player != previewPlayer) {
+                                    view.player = previewPlayer
+                                }
+                            },
+                            onRelease = { view ->
+                                view.player = null
+                            },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+            }
+
+            // 2. Floating Time Badge Pill (YouTube/Netflix style)
+            Box(
+                modifier = Modifier
+                    .background(Color.Black.copy(alpha = 0.90f), RoundedCornerShape(5.dp))
+                    .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(5.dp))
+                    .padding(horizontal = 8.dp, vertical = 3.dp)
+            ) {
+                Text(
+                    text = formatPreviewTime(seekMs),
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun VideoProgressBar(
+    currentPositionMs: Long,
+    durationMs: Long,
+    onSeek: (Long) -> Unit,
+    onSeekFinished: (Long) -> Unit,
+    onSeekingChanged: ((Boolean, Long, Float) -> Unit)? = null,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier,
+    activeColor: Color = Color(0xFFE50914),
+    inactiveColor: Color = Color.White.copy(alpha = 0.35f),
+    thumbColor: Color = Color(0xFFE50914)
+) {
+    val totalMs = maxOf(1L, durationMs)
+    var isDragging by remember { mutableStateOf(false) }
+    var dragFraction by remember { mutableStateOf(0f) }
+
+    val currentFraction = if (isDragging) {
+        dragFraction
+    } else {
+        (currentPositionMs.toFloat() / totalMs.toFloat()).coerceIn(0f, 1f)
+    }
+
+    val currentTotalMs by rememberUpdatedState(totalMs)
+    val currentOnSeek by rememberUpdatedState(onSeek)
+    val currentOnSeekFinished by rememberUpdatedState(onSeekFinished)
+    val currentOnSeekingChanged by rememberUpdatedState(onSeekingChanged)
+
+    Box(
+        modifier = modifier
+            .height(32.dp)
+            .pointerInput(enabled) {
+                if (!enabled) return@pointerInput
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    down.consume()
+                    isDragging = true
+                    var fraction = (down.position.x / size.width.toFloat()).coerceIn(0f, 1f)
+                    dragFraction = fraction
+                    var targetMs = (fraction * currentTotalMs).toLong()
+                    currentOnSeek(targetMs)
+                    currentOnSeekingChanged?.invoke(true, targetMs, fraction)
+
+                    val pointerId = down.id
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == pointerId }
+                        if (change == null || !change.pressed) {
+                            break
+                        }
+                        change.consume()
+                        fraction = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
+                        dragFraction = fraction
+                        targetMs = (fraction * currentTotalMs).toLong()
+                        currentOnSeek(targetMs)
+                        currentOnSeekingChanged?.invoke(true, targetMs, fraction)
+                    }
+
+                    isDragging = false
+                    currentOnSeekingChanged?.invoke(false, targetMs, fraction)
+                    currentOnSeekFinished(targetMs)
+                }
+            },
+        contentAlignment = Alignment.CenterStart
+    ) {
+        Canvas(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(16.dp)
+        ) {
+            val centerY = size.height / 2f
+            val trackHeight = 2.5.dp.toPx()
+            val thumbRadius = if (isDragging) 6.5.dp.toPx() else 4.5.dp.toPx()
+            val activeWidth = size.width * currentFraction
+
+            // Inactive (background) Track
+            drawLine(
+                color = inactiveColor,
+                start = Offset(0f, centerY),
+                end = Offset(size.width, centerY),
+                strokeWidth = trackHeight,
+                cap = StrokeCap.Round
+            )
+
+            // Active (played) Track
+            if (activeWidth > 0f) {
+                drawLine(
+                    color = if (enabled) activeColor else Color.LightGray.copy(alpha = 0.6f),
+                    start = Offset(0f, centerY),
+                    end = Offset(activeWidth.coerceAtMost(size.width), centerY),
+                    strokeWidth = trackHeight,
+                    cap = StrokeCap.Round
+                )
+            }
+
+            // Single clean circular thumb dot
+            if (enabled) {
+                drawCircle(
+                    color = thumbColor,
+                    radius = thumbRadius,
+                    center = Offset(activeWidth.coerceIn(0f, size.width), centerY)
+                )
+            }
+        }
+    }
+}
+
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun PlayerScreen(viewModel: MovieViewModel) {
     val playInfo = viewModel.playInfo ?: return
@@ -2256,6 +2679,26 @@ fun PlayerScreen(viewModel: MovieViewModel) {
     val streamUrl = if (rawUrl == "https://macdn.aoneroom.com/other/2026/09/04/b164fbfb4347792950bdfbfb563d39d9.mp4") "" else rawUrl
     val selectedCookie = selectedStream?.cookie ?: ""
     val subtitleUrl = viewModel.selectedSubtitle?.url
+
+    val previewHeaders = remember(rawUrl, selectedCookie, viewModel.isAniFam) {
+        val map = mutableMapOf<String, String>()
+        map["User-Agent"] = if (viewModel.isAniFam) "okhttp/4.12.0" else "MovieBoxPro/16.2.1 (Android 14; com.community.mbox.in)"
+        if (viewModel.isAniFam || rawUrl.contains("dramahot.top") || rawUrl.contains("zokoanime") || rawUrl.contains("hakunaymatata")) {
+            map["Referer"] = "https://zokoanime.video/"
+            map["Origin"] = "https://zokoanime.video"
+        }
+        if (selectedCookie.isNotEmpty()) {
+            if (selectedCookie.contains("=") && (selectedCookie.contains("Referer=") || selectedCookie.contains("Origin="))) {
+                selectedCookie.split(";").forEach { pair ->
+                    val parts = pair.split("=", limit = 2)
+                    if (parts.size == 2) map[parts[0].trim()] = parts[1].trim()
+                }
+            } else {
+                map["Cookie"] = selectedCookie
+            }
+        }
+        map
+    }
 
     var activeSheet by remember { mutableStateOf<String?>(null) }
     var isDownloadSelectionMode by remember { mutableStateOf(false) }
@@ -2285,6 +2728,10 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                 activity.window.decorView.systemUiVisibility = android.view.View.SYSTEM_UI_FLAG_VISIBLE
             }
         } else {
+            if (viewModel.activeW2GRoom != null) {
+                viewModel.leaveActiveW2GRoom()
+                viewModel.selectedSubject = null
+            }
             viewModel.playInfo = null
             val activity = context as? android.app.Activity
             if (activity != null) {
@@ -2346,6 +2793,15 @@ fun PlayerScreen(viewModel: MovieViewModel) {
         sessionManager?.addSessionManagerListener(castListener, com.google.android.gms.cast.framework.CastSession::class.java)
         onDispose {
             sessionManager?.removeSessionManagerListener(castListener, com.google.android.gms.cast.framework.CastSession::class.java)
+        }
+    }
+
+    LaunchedEffect(viewModel.selectedStream, isCastConnected) {
+        if (isCastConnected && castContext != null) {
+            val session = castContext.sessionManager?.currentCastSession
+            if (session != null && session.isConnected && viewModel.selectedStream != null) {
+                loadMediaOnCast(session, viewModel.selectedStream?.url ?: streamUrl, subject, viewModel, context)
+            }
         }
     }
 
@@ -2417,11 +2873,75 @@ fun PlayerScreen(viewModel: MovieViewModel) {
             }
     }
 
-    // Sync native playlist next/prev buttons transitions with ViewModel selections
+    // Dedicated lightweight preview player for live scrubbing thumbnail frames
+    val previewPlayer = remember(context) {
+        ExoPlayer.Builder(context).build().apply {
+            volume = 0f
+            playWhenReady = false
+            setSeekParameters(androidx.media3.exoplayer.SeekParameters.CLOSEST_SYNC)
+        }
+    }
+    DisposableEffect(previewPlayer) {
+        onDispose {
+            try { previewPlayer.release() } catch (_: Throwable) {}
+        }
+    }
+
+    var currentProgressMs by remember { mutableStateOf(viewModel.playbackProgressMs) }
+    var durationMs by remember { mutableStateOf(viewModel.mediaDurationMs) }
+    var isSeeking by remember { mutableStateOf(false) }
+    var seekPositionMs by remember { mutableStateOf(0L) }
+    var seekFraction by remember { mutableStateOf(0f) }
+    var lastSeekFinishedTime by remember { mutableStateOf(0L) }
+
+    // Sync native playlist next/prev buttons transitions with ViewModel selections & W2G Live Sync
     DisposableEffect(exoPlayer) {
         val listener = object : androidx.media3.common.Player.Listener {
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
                 viewModel.isPlaying = playWhenReady
+                // Live Sync: If host, broadcast play/pause state and current position
+                if (viewModel.isAniFam && viewModel.activeW2GRoom != null && viewModel.isHostingW2G) {
+                    val posSec = (exoPlayer.currentPosition / 1000).toInt().coerceAtLeast(0)
+                    viewModel.syncW2GPlayback(if (playWhenReady) "play" else "pause", posSec)
+                }
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                // Live Sync: When video is loaded and ready, set duration and sync initial position
+                if (playbackState == androidx.media3.common.Player.STATE_READY) {
+                    val dur = exoPlayer.duration
+                    if (dur > 0) {
+                        durationMs = dur
+                    }
+                    currentProgressMs = exoPlayer.currentPosition
+
+                    if (viewModel.isAniFam && viewModel.activeW2GRoom != null) {
+                        val initialPosMs = (viewModel.activeW2GRoom?.state?.positionSeconds ?: 0) * 1000L
+                        if (initialPosMs > 0 && exoPlayer.currentPosition < 1000L) {
+                            exoPlayer.seekTo(initialPosMs)
+                            currentProgressMs = initialPosMs
+                        }
+                        if (!viewModel.isHostingW2G) {
+                            val hostPlaying = viewModel.activeW2GRoom?.state?.playing == true
+                            exoPlayer.playWhenReady = hostPlaying
+                            viewModel.isPlaying = hostPlaying
+                        }
+                    }
+                }
+            }
+
+            override fun onPositionDiscontinuity(
+                oldPosition: androidx.media3.common.Player.PositionInfo,
+                newPosition: androidx.media3.common.Player.PositionInfo,
+                reason: Int
+            ) {
+                // Live Sync: If host manually seeks, broadcast seek position
+                if (reason == androidx.media3.common.Player.DISCONTINUITY_REASON_SEEK) {
+                    if (viewModel.isAniFam && viewModel.activeW2GRoom != null && viewModel.isHostingW2G) {
+                        val posSec = (newPosition.positionMs / 1000).toInt().coerceAtLeast(0)
+                        viewModel.syncW2GPlayback("seek", posSec)
+                    }
+                }
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
@@ -2440,8 +2960,26 @@ fun PlayerScreen(viewModel: MovieViewModel) {
         }
     }
 
-    var currentProgressMs by remember { mutableStateOf(viewModel.playbackProgressMs) }
-    var durationMs by remember { mutableStateOf(viewModel.mediaDurationMs) }
+    // Live Sync: Guest auto-follows host playback state and position drift
+    androidx.compose.runtime.LaunchedEffect(viewModel.activeW2GRoom?.state) {
+        val state = viewModel.activeW2GRoom?.state ?: return@LaunchedEffect
+        if (viewModel.isAniFam && !viewModel.isHostingW2G && !viewModel.isGuestWatchingOnOwn && exoPlayer.playbackState != androidx.media3.common.Player.STATE_IDLE) {
+            val hostPlaying = state.playing == true
+            val targetPosMs = (state.positionSeconds * 1000L).coerceAtLeast(0L)
+
+            // Match play/pause
+            if (exoPlayer.playWhenReady != hostPlaying) {
+                exoPlayer.playWhenReady = hostPlaying
+                viewModel.isPlaying = hostPlaying
+            }
+
+            // Correct position drift if greater than 2.5 seconds (2500ms)
+            val currentPos = exoPlayer.currentPosition
+            if (kotlin.math.abs(currentPos - targetPosMs) > 2500L) {
+                exoPlayer.seekTo(targetPosMs)
+            }
+        }
+    }
 
     // Update stream and subtitle configuration
     LaunchedEffect(streamUrl, subtitleUrl) {
@@ -2530,6 +3068,15 @@ fun PlayerScreen(viewModel: MovieViewModel) {
             if (viewModel.isPlaying) {
                 exoPlayer.play()
             }
+
+            // Prepare read-only preview player for live scrubbing
+            try {
+                val previewMediaSource = mediaSourceFactory.createMediaSource(mediaItemBuilder.build())
+                previewPlayer.setMediaSource(previewMediaSource)
+                previewPlayer.prepare()
+            } catch (e: Throwable) {
+                android.util.Log.e("PlayerScreen", "Failed to prepare preview player", e)
+            }
         }
     }
 
@@ -2557,8 +3104,8 @@ fun PlayerScreen(viewModel: MovieViewModel) {
     }
 
     // Auto-hide controller when playing
-    LaunchedEffect(isControllerVisible, viewModel.isPlaying) {
-        if (isControllerVisible && viewModel.isPlaying) {
+    LaunchedEffect(isControllerVisible, viewModel.isPlaying, isSeeking) {
+        if (isControllerVisible && viewModel.isPlaying && !isSeeking) {
             delay(4000)
             isControllerVisible = false
         }
@@ -2632,12 +3179,14 @@ fun PlayerScreen(viewModel: MovieViewModel) {
     LaunchedEffect(viewModel.isPlaying) {
         if (viewModel.isPlaying) {
             while (true) {
-                val pos = exoPlayer.currentPosition
-                val dur = exoPlayer.duration
-                if (dur > 0) {
-                    currentProgressMs = pos
-                    durationMs = dur
-                    viewModel.updatePlaybackProgress(pos, dur)
+                if (!isSeeking && System.currentTimeMillis() - lastSeekFinishedTime > 1200L) {
+                    val pos = exoPlayer.currentPosition
+                    val dur = exoPlayer.duration
+                    if (dur > 0) {
+                        currentProgressMs = pos
+                        durationMs = dur
+                        viewModel.updatePlaybackProgress(pos, dur)
+                    }
                 }
                 delay(1000)
             }
@@ -2666,6 +3215,66 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                 .fillMaxSize()
                 .then(if (!isFullscreen) Modifier.statusBarsPadding() else Modifier)
         ) {
+
+            // Top Bar in Portrait W2G Mode (matches AniFam official W2G UI)
+            if (!isFullscreen && !isInPip && viewModel.isAniFam && viewModel.activeW2GRoom != null) {
+                val room = viewModel.activeW2GRoom!!
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color.Black)
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(
+                        onClick = {
+                            viewModel.leaveActiveW2GRoom()
+                            viewModel.selectedSubject = null
+                            viewModel.playInfo = null
+                        },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(Icons.Filled.ArrowBack, contentDescription = "Leave Watch Party", tint = Color.White)
+                    }
+
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = room.name?.ifEmpty { null } ?: room.host?.name ?: "Watch Party",
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        val epNumber = room.episode?.episodeNumber ?: viewModel.currentEpisode?.episodeNumber ?: 1
+                        val subText = "${room.anime?.title ?: subject.name} - Ep $epNumber"
+                        Text(
+                            text = subText,
+                            color = TextSecondary,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    TextButton(
+                        onClick = {
+                            viewModel.leaveActiveW2GRoom()
+                            viewModel.selectedSubject = null
+                            viewModel.playInfo = null
+                        }
+                    ) {
+                        Text(
+                            text = if (viewModel.isHostingW2G) "End room" else "Leave room",
+                            color = Color(0xFFEF4444),
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 14.sp
+                        )
+                    }
+                }
+            }
 
             // Player Container (Always present in tree at index 0)
         Box(
@@ -2732,14 +3341,23 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                                     val leftBoundary = width * 0.35f
                                     val rightBoundary = width * 0.65f
 
+                                    // If guest in W2G, mark independent playback (watching on own)
+                                    if (viewModel.isAniFam && viewModel.activeW2GRoom != null && !viewModel.isHostingW2G) {
+                                        viewModel.isGuestWatchingOnOwn = true
+                                    }
+
                                     when {
                                         x < leftBoundary -> {
-                                            // Left side: rewind 5 seconds
+                                            // Left side: rewind 10 seconds (matches AniFam official player)
                                             val current = exoPlayer.currentPosition
-                                            val target = (current - 5000L).coerceAtLeast(0L)
+                                            val target = (current - 10000L).coerceAtLeast(0L)
                                             exoPlayer.seekTo(target)
+                                            if (viewModel.isAniFam && viewModel.activeW2GRoom != null && viewModel.isHostingW2G) {
+                                                val posSec = (target / 1000).toInt().coerceAtLeast(0)
+                                                viewModel.syncW2GPlayback("seek", posSec)
+                                            }
                                             doubleTapActionSide = "left"
-                                            doubleTapActionText = "-5s"
+                                            doubleTapActionText = "-10s"
                                             gestureAnimTrigger = System.currentTimeMillis()
                                         }
                                         x > rightBoundary -> {
@@ -2748,6 +3366,10 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                                             val dur = exoPlayer.duration
                                             val target = if (dur > 0) (current + 10000L).coerceAtMost(dur) else current + 10000L
                                             exoPlayer.seekTo(target)
+                                            if (viewModel.isAniFam && viewModel.activeW2GRoom != null && viewModel.isHostingW2G) {
+                                                val posSec = (target / 1000).toInt().coerceAtLeast(0)
+                                                viewModel.syncW2GPlayback("seek", posSec)
+                                            }
                                             doubleTapActionSide = "right"
                                             doubleTapActionText = "+10s"
                                             gestureAnimTrigger = System.currentTimeMillis()
@@ -2757,11 +3379,19 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                                             if (exoPlayer.isPlaying) {
                                                 exoPlayer.pause()
                                                 viewModel.isPlaying = false
+                                                if (viewModel.isAniFam && viewModel.activeW2GRoom != null && viewModel.isHostingW2G) {
+                                                    val posSec = (exoPlayer.currentPosition / 1000).toInt().coerceAtLeast(0)
+                                                    viewModel.syncW2GPlayback("pause", posSec)
+                                                }
                                                 doubleTapActionSide = "center"
                                                 doubleTapActionText = "PAUSE"
                                             } else {
                                                 exoPlayer.play()
                                                 viewModel.isPlaying = true
+                                                if (viewModel.isAniFam && viewModel.activeW2GRoom != null && viewModel.isHostingW2G) {
+                                                    val posSec = (exoPlayer.currentPosition / 1000).toInt().coerceAtLeast(0)
+                                                    viewModel.syncW2GPlayback("play", posSec)
+                                                }
                                                 doubleTapActionSide = "center"
                                                 doubleTapActionText = "PLAY"
                                             }
@@ -2903,49 +3533,100 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            IconButton(onClick = {
-                                viewModel.playInfo = null
-                                val activity = context as? android.app.Activity
-                                if (activity != null) {
-                                    activity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-                                    activity.window.decorView.systemUiVisibility = android.view.View.SYSTEM_UI_FLAG_VISIBLE
+                            if (viewModel.activeW2GRoom == null || isFullscreen) {
+                                IconButton(onClick = {
+                                    if (viewModel.activeW2GRoom != null) {
+                                        viewModel.leaveActiveW2GRoom()
+                                        viewModel.selectedSubject = null
+                                    }
+                                    viewModel.playInfo = null
+                                    val activity = context as? android.app.Activity
+                                    if (activity != null) {
+                                        activity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                                        activity.window.decorView.systemUiVisibility = android.view.View.SYSTEM_UI_FLAG_VISIBLE
+                                    }
+                                }) {
+                                    Icon(
+                                        Icons.Filled.ArrowBack,
+                                        contentDescription = "Close Player",
+                                        tint = Color.White
+                                    )
                                 }
-                            }) {
-                                Icon(
-                                    Icons.Filled.ArrowBack,
-                                    contentDescription = "Close Player",
-                                    tint = Color.White
-                                )
+                            } else {
+                                Spacer(modifier = Modifier.size(36.dp))
                             }
                             
-                            // Top Right Icons: Download and Settings Gear
+                            // Top Right Icons: Sync with host (if watching on own), Download (hidden in W2G party mode) and Settings Gear
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                IconButton(onClick = {
-                                    val safeTitle = if (subject.isTvShow) {
-                                        "${subject.name} S${viewModel.selectedSeason}E${viewModel.currentEpisode?.episodeNumber}"
-                                    } else {
-                                        subject.name
+                                if (viewModel.isAniFam && viewModel.activeW2GRoom != null && !viewModel.isHostingW2G && viewModel.isGuestWatchingOnOwn) {
+                                    Surface(
+                                        shape = RoundedCornerShape(16.dp),
+                                        color = Color(0xFFEF4444),
+                                        modifier = Modifier
+                                            .padding(end = 8.dp)
+                                            .clip(RoundedCornerShape(16.dp))
+                                            .clickable {
+                                                viewModel.isGuestWatchingOnOwn = false
+                                                val state = viewModel.activeW2GRoom?.state
+                                                val targetPosMs = (state?.positionSeconds ?: 0) * 1000L
+                                                exoPlayer.seekTo(targetPosMs)
+                                                val hostPlaying = state?.playing == true
+                                                exoPlayer.playWhenReady = hostPlaying
+                                                viewModel.isPlaying = hostPlaying
+                                            }
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Filled.Refresh,
+                                                contentDescription = "Sync with host",
+                                                tint = Color.White,
+                                                modifier = Modifier.size(13.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text(
+                                                text = "Sync with host",
+                                                color = Color.White,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
                                     }
-                                    val bestStream = viewModel.playInfo?.streamList?.let { viewModel.selectHighestQualityStream(it) }
-                                    val dlUrl = bestStream?.url?.takeIf { it.isNotEmpty() && !it.contains("b164fbfb4347792950bdfbfb563d39d9.mp4") } ?: streamUrl
-                                    val cookies = bestStream?.cookie ?: ""
-                                    viewModel.startDownload(context, subject, safeTitle, dlUrl, cookies)
-                                }) {
-                                    Icon(
-                                        Icons.Filled.Download,
-                                        contentDescription = "Download Video",
-                                        tint = Color.White
-                                    )
+                                }
+
+                                if (viewModel.activeW2GRoom == null) {
+                                    IconButton(onClick = {
+                                        val safeTitle = if (subject.isTvShow) {
+                                            "${subject.name} S${viewModel.selectedSeason}E${viewModel.currentEpisode?.episodeNumber}"
+                                        } else {
+                                            subject.name
+                                        }
+                                        val bestStream = viewModel.playInfo?.streamList?.let { viewModel.selectHighestQualityStream(it) }
+                                        val targetStream = if (viewModel.isAniFam) (viewModel.selectedStream ?: bestStream) else (bestStream ?: viewModel.selectedStream)
+                                        val dlUrl = targetStream?.url?.takeIf { it.isNotEmpty() && !it.contains("b164fbfb4347792950bdfbfb563d39d9.mp4") } ?: streamUrl
+                                        val cookies = targetStream?.cookie ?: viewModel.selectedStream?.cookie ?: ""
+                                        viewModel.startDownload(context, subject, safeTitle, dlUrl, cookies, viewModel.playInfo?.subTitleList ?: emptyList())
+                                    }) {
+                                        Icon(
+                                            Icons.Filled.Download,
+                                            contentDescription = "Download Video",
+                                            tint = Color.White
+                                        )
+                                    }
                                 }
                                 
-                                IconButton(onClick = {
-                                    activeSheet = "player_settings"
-                                }) {
-                                    Icon(
-                                        Icons.Filled.Settings,
-                                        contentDescription = "Player Settings",
-                                        tint = Color.White
-                                    )
+                                if (viewModel.activeW2GRoom == null) {
+                                    IconButton(onClick = {
+                                        activeSheet = "player_settings"
+                                    }) {
+                                        Icon(
+                                            Icons.Filled.Settings,
+                                            contentDescription = "Player Settings",
+                                            tint = Color.White
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -2960,65 +3641,123 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                             )
                         }
 
-                        // Bottom Controls Row: Play/Pause, Seekbar, Duration, PIP, Fullscreen
-                        Row(
+                        // Bottom Controls: Floating Seek Preview + Controls Row
+                        Column(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .align(Alignment.BottomStart)
                                 .background(
                                     Brush.verticalGradient(
-                                        colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.6f))
+                                        colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.7f))
                                     )
                                 )
-                                .navigationBarsPadding()
+                                .then(if (isFullscreen) Modifier.navigationBarsPadding() else Modifier)
                                 .clickable(enabled = false) {} // block click-through
-                                .padding(horizontal = 12.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            // Play/Pause Button
-                            IconButton(
-                                onClick = {
-                                    if (exoPlayer.isPlaying) {
-                                        exoPlayer.pause()
-                                        viewModel.isPlaying = false
-                                    } else {
-                                        exoPlayer.play()
-                                        viewModel.isPlaying = true
-                                    }
-                                },
-                                modifier = Modifier.size(32.dp)
+                            // Floating Seek Preview Popup (above the seekbar, never clipped!)
+                            androidx.compose.animation.AnimatedVisibility(
+                                visible = isSeeking,
+                                enter = fadeIn(tween(120)) + scaleIn(tween(120)),
+                                exit = fadeOut(tween(120))
                             ) {
-                                Icon(
-                                    if (viewModel.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                                    contentDescription = "Play/Pause",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(24.dp)
-                                )
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp),
+                                    verticalAlignment = Alignment.Bottom
+                                ) {
+                                    Spacer(modifier = Modifier.size(32.dp))
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .padding(horizontal = 8.dp)
+                                    ) {
+                                        SeekPreviewPopup(
+                                            seekMs = seekPositionMs,
+                                            fraction = seekFraction,
+                                            previewPlayer = previewPlayer
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(120.dp))
+                                }
                             }
 
-                            // Progress Slider
-                            Slider(
-                                value = currentProgressMs.toFloat(),
-                                onValueChange = { currentProgressMs = it.toLong() },
-                                onValueChangeFinished = { exoPlayer.seekTo(currentProgressMs) },
-                                valueRange = 0f..maxOf(1f, durationMs.toFloat()),
-                                colors = SliderDefaults.colors(
-                                    thumbColor = Color.White,
-                                    activeTrackColor = Color.White,
-                                    inactiveTrackColor = Color.Gray.copy(alpha = 0.4f)
-                                ),
+                            Row(
                                 modifier = Modifier
-                                    .weight(1f)
-                                    .padding(horizontal = 8.dp)
-                            )
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // Play/Pause Button
+                                IconButton(
+                                    onClick = {
+                                        if (viewModel.isAniFam && viewModel.activeW2GRoom != null && !viewModel.isHostingW2G) {
+                                            viewModel.isGuestWatchingOnOwn = true
+                                        }
+                                        if (exoPlayer.isPlaying) {
+                                            exoPlayer.pause()
+                                            viewModel.isPlaying = false
+                                            if (viewModel.isAniFam && viewModel.activeW2GRoom != null && viewModel.isHostingW2G) {
+                                                val posSec = (exoPlayer.currentPosition / 1000).toInt().coerceAtLeast(0)
+                                                viewModel.syncW2GPlayback("pause", posSec)
+                                            }
+                                        } else {
+                                            exoPlayer.play()
+                                            viewModel.isPlaying = true
+                                            if (viewModel.isAniFam && viewModel.activeW2GRoom != null && viewModel.isHostingW2G) {
+                                                val posSec = (exoPlayer.currentPosition / 1000).toInt().coerceAtLeast(0)
+                                                viewModel.syncW2GPlayback("play", posSec)
+                                            }
+                                        }
+                                    },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        if (viewModel.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                        contentDescription = "Play/Pause",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
 
-                            // Position / Duration text (e.g. 00:03/02:05)
-                            Text(
-                                text = "${formatTime(currentProgressMs)}/${formatTime(durationMs)}",
-                                color = Color.White,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Medium
-                            )
+                                // Video Progress Bar (Thin, crisp line with a single clean circular thumb dot)
+                                VideoProgressBar(
+                                    currentPositionMs = if (isSeeking) seekPositionMs else currentProgressMs,
+                                    durationMs = durationMs,
+                                    onSeek = { seekPositionMs = it },
+                                    onSeekFinished = { targetMs ->
+                                        lastSeekFinishedTime = System.currentTimeMillis()
+                                        currentProgressMs = targetMs
+                                        if (viewModel.isAniFam && viewModel.activeW2GRoom != null && !viewModel.isHostingW2G) {
+                                            viewModel.isGuestWatchingOnOwn = true
+                                        }
+                                        exoPlayer.seekTo(targetMs)
+                                        if (viewModel.isAniFam && viewModel.activeW2GRoom != null && viewModel.isHostingW2G) {
+                                            val posSec = (targetMs / 1000).toInt().coerceAtLeast(0)
+                                            viewModel.syncW2GPlayback("seek", posSec)
+                                        }
+                                    },
+                                    onSeekingChanged = { seeking, ms, frac ->
+                                        isSeeking = seeking
+                                        if (seeking) {
+                                            isControllerVisible = true
+                                        }
+                                        seekPositionMs = ms
+                                        seekFraction = frac
+                                    },
+                                    enabled = true,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(horizontal = 8.dp)
+                                )
+
+                                // Position / Duration text (e.g. 00:03/02:05)
+                                Text(
+                                    text = "${formatTime(if (isSeeking) seekPositionMs else currentProgressMs)}/${formatTime(durationMs)}",
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
 
                             Spacer(modifier = Modifier.width(12.dp))
 
@@ -3072,10 +3811,11 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                                     tint = Color.White,
                                     modifier = Modifier.size(22.dp)
                                 )
+                            }
+                        }
                     }
                 }
             }
-        }
 
                 // Transparent click catcher overlay on player view when bottom sheet is active
                 if (activeSheet != null) {
@@ -3102,6 +3842,7 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                     .fillMaxWidth()
                     .weight(1f)
             ) {
+                if (activeSheet != null) {
                     // Player Controller Panels (Subtitles, Dubs & Resolutions)
                     Column(
                         modifier = Modifier
@@ -3110,7 +3851,6 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                             .padding(16.dp)
                             .verticalScroll(rememberScrollState())
                     ) {
-                        if (activeSheet != null) {
                         Column(
                             modifier = Modifier.fillMaxWidth()
                         ) {
@@ -3392,7 +4132,32 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                                 }
                             }
                         }
-                    } else {
+                    }
+                } else if (viewModel.isAniFam && viewModel.activeW2GRoom != null) {
+                    // Dedicated W2G Watch Party Screen (matches image 2)
+                    W2GPartyPlayerBottomView(
+                        room = viewModel.activeW2GRoom!!,
+                        viewModel = viewModel,
+                        context = context,
+                        onSyncWithHost = {
+                            viewModel.isGuestWatchingOnOwn = false
+                            val state = viewModel.activeW2GRoom?.state
+                            val targetPosMs = (state?.positionSeconds ?: 0) * 1000L
+                            exoPlayer.seekTo(targetPosMs)
+                            val hostPlaying = state?.playing == true
+                            exoPlayer.playWhenReady = hostPlaying
+                            viewModel.isPlaying = hostPlaying
+                        }
+                    )
+                } else {
+                    // Normal Portrait Details & Episodes Section
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(ObsidianDark)
+                            .padding(16.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
                         // Resource, Season and Inline Download Trigger
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -3466,6 +4231,251 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                                     }
                                 }
                             }
+
+                            // W2G Watch Party Button (AniFam only)
+                            if (viewModel.isAniFam) {
+                                var showCreateW2GDialog by remember { mutableStateOf(false) }
+                                var showAuthSheet by remember { mutableStateOf(false) }
+                                var createdRoomCode by remember { mutableStateOf<String?>(null) }
+                                var isCreatingW2G by remember { mutableStateOf(false) }
+
+                                androidx.compose.runtime.LaunchedEffect(viewModel.isLoggedIn) {
+                                    if (viewModel.isLoggedIn) {
+                                        showAuthSheet = false
+                                    }
+                                }
+
+                                Button(
+                                    onClick = {
+                                        if (!viewModel.isLoggedIn) {
+                                            showAuthSheet = true
+                                            return@Button
+                                        }
+                                        if (viewModel.activeW2GRoom != null) {
+                                            Toast.makeText(context, "Already in Watch Party (${viewModel.activeW2GRoom?.public_id})", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            isCreatingW2G = true
+                                            viewModel.createW2GRoomForCurrentEpisode(
+                                                onSuccess = { code ->
+                                                    isCreatingW2G = false
+                                                    createdRoomCode = code
+                                                    showCreateW2GDialog = true
+                                                },
+                                                onError = { err ->
+                                                    isCreatingW2G = false
+                                                    if (err == "AUTH_REQUIRED") {
+                                                        showAuthSheet = true
+                                                    } else if (err != "ACTIVE_ROOM_EXISTS") {
+                                                        Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
+                                                    }
+                                                }
+                                            )
+                                        }
+                                    },
+                                    shape = RoundedCornerShape(8.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = if (viewModel.activeW2GRoom != null) CinematicRed else Color(0xFF2D2D30)
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                                ) {
+                                    if (isCreatingW2G) {
+                                        CircularProgressIndicator(color = Color.White, modifier = Modifier.size(16.dp))
+                                    } else {
+                                        Icon(
+                                            imageVector = Icons.Filled.Groups,
+                                            contentDescription = "Watch Together",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = if (viewModel.activeW2GRoom != null) "In Party" else "W2G",
+                                            color = Color.White,
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+
+                                if (showAuthSheet) {
+                                    androidx.compose.ui.window.Dialog(
+                                        onDismissRequest = { showAuthSheet = false },
+                                        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+                                    ) {
+                                        Surface(
+                                            modifier = Modifier.fillMaxSize(),
+                                            color = ObsidianDark
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .statusBarsPadding()
+                                                    .navigationBarsPadding()
+                                                    .padding(16.dp)
+                                            ) {
+                                                AuthSheet(
+                                                    viewModel = viewModel,
+                                                    onDismiss = { showAuthSheet = false }
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if (showCreateW2GDialog && createdRoomCode != null) {
+                                    AlertDialog(
+                                        onDismissRequest = { showCreateW2GDialog = false },
+                                        containerColor = ObsidianCard,
+                                        title = {
+                                            Text(
+                                                text = "Watch Party Created!",
+                                                color = TextPrimary,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 18.sp
+                                            )
+                                        },
+                                        text = {
+                                            Column {
+                                                Text(
+                                                    text = "Share this Room Code with your friends:",
+                                                    color = TextSecondary,
+                                                    fontSize = 13.sp
+                                                )
+                                                Spacer(modifier = Modifier.height(12.dp))
+                                                Surface(
+                                                    color = ObsidianDark,
+                                                    shape = RoundedCornerShape(8.dp),
+                                                    modifier = Modifier.fillMaxWidth()
+                                                ) {
+                                                    Row(
+                                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.SpaceBetween
+                                                    ) {
+                                                        Text(
+                                                            text = createdRoomCode!!,
+                                                            color = CinematicRed,
+                                                            fontWeight = FontWeight.Bold,
+                                                            fontSize = 18.sp,
+                                                            letterSpacing = 2.sp
+                                                        )
+                                                        IconButton(
+                                                            onClick = {
+                                                                val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                                                                val clip = android.content.ClipData.newPlainText("Room Code", createdRoomCode)
+                                                                clipboard?.setPrimaryClip(clip)
+                                                                Toast.makeText(context, "Room Code copied!", Toast.LENGTH_SHORT).show()
+                                                            }
+                                                        ) {
+                                                            Icon(Icons.Filled.ContentCopy, contentDescription = "Copy", tint = TextPrimary)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        confirmButton = {
+                                            Button(
+                                                onClick = { showCreateW2GDialog = false },
+                                                colors = ButtonDefaults.buttonColors(containerColor = CinematicRed)
+                                            ) {
+                                                Text("Start Watching", fontWeight = FontWeight.Bold)
+                                            }
+                                        }
+                                    )
+                                }
+
+                                if (viewModel.showActiveRoomDialog && viewModel.activeExistingW2GRoom != null) {
+                                    val existing = viewModel.activeExistingW2GRoom!!
+                                    AlertDialog(
+                                        onDismissRequest = { viewModel.showActiveRoomDialog = false },
+                                        containerColor = ObsidianCard,
+                                        title = {
+                                            Text(
+                                                text = "Active Watch Party Found",
+                                                color = Color.White,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 18.sp
+                                            )
+                                        },
+                                        text = {
+                                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                Text(
+                                                    text = "You already have an active room on the server. AniFam requires ending your previous room before creating a new one.",
+                                                    color = Color.White.copy(alpha = 0.8f),
+                                                    fontSize = 13.sp
+                                                )
+                                                Surface(
+                                                    color = Color(0xFF1E1E24),
+                                                    shape = RoundedCornerShape(8.dp)
+                                                ) {
+                                                    Column(modifier = Modifier.padding(12.dp)) {
+                                                        Text(
+                                                            text = existing.anime?.title ?: existing.name ?: "My Room",
+                                                            color = CinematicRed,
+                                                            fontWeight = FontWeight.Bold,
+                                                            fontSize = 14.sp
+                                                        )
+                                                        Text(
+                                                            text = "Episode ${existing.episode?.episodeNumber ?: 1} • Code: ${existing.public_id}",
+                                                            color = Color.White.copy(alpha = 0.6f),
+                                                            fontSize = 12.sp
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        confirmButton = {
+                                            Button(
+                                                onClick = {
+                                                    viewModel.showActiveRoomDialog = false
+                                                    isCreatingW2G = true
+                                                    viewModel.endExistingAndCreateNewW2GRoom(
+                                                        existingRoomId = existing.public_id,
+                                                        onSuccess = { code ->
+                                                            isCreatingW2G = false
+                                                            createdRoomCode = code
+                                                            showCreateW2GDialog = true
+                                                        },
+                                                        onError = { err ->
+                                                            isCreatingW2G = false
+                                                            Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
+                                                        }
+                                                    )
+                                                },
+                                                colors = ButtonDefaults.buttonColors(containerColor = CinematicRed)
+                                            ) {
+                                                Text("End Old & Create New")
+                                            }
+                                        },
+                                        dismissButton = {
+                                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                TextButton(
+                                                    onClick = { viewModel.showActiveRoomDialog = false }
+                                                ) {
+                                                    Text("Cancel", color = Color.White.copy(alpha = 0.6f))
+                                                }
+                                                Button(
+                                                    onClick = {
+                                                        viewModel.showActiveRoomDialog = false
+                                                        viewModel.rejoinExistingW2GRoom(
+                                                            roomId = existing.public_id,
+                                                            onSuccess = {
+                                                                Toast.makeText(context, "Rejoined party as host!", Toast.LENGTH_SHORT).show()
+                                                            },
+                                                            onError = { err ->
+                                                                Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
+                                                            }
+                                                        )
+                                                    },
+                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2D2D30))
+                                                ) {
+                                                    Text("Rejoin Room", color = Color.White)
+                                                }
+                                            }
+                                        }
+                                    )
+                                }
+                            }
                         }
 
                         // Quality Option Selector (Only visible in Download Selection Mode)
@@ -3516,7 +4526,6 @@ fun PlayerScreen(viewModel: MovieViewModel) {
                             }
                         }
 
-                        // Episodes Section: Download Selection List OR Normal 4-Column Grid
                         if (subject.isTvShow) {
                             if (isDownloadSelectionMode) {
                                 val activeSeasonInfo = subject.seasonList.find { it.season == viewModel.selectedSeason }
@@ -3646,7 +4655,7 @@ fun PlayerScreen(viewModel: MovieViewModel) {
             }
 
             // Sticky Bottom Action Bar for Download All / Selected (Always visible on screen, no need to scroll to bottom!)
-            if (activeSheet == null && isDownloadSelectionMode && subject.isTvShow) {
+            if (activeSheet == null && viewModel.activeW2GRoom == null && isDownloadSelectionMode && subject.isTvShow) {
                 Card(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -4408,6 +5417,8 @@ fun DownloadScreen(viewModel: MovieViewModel) {
     val downloadedFiles = viewModel.downloadedFiles
     val activeDownloads = viewModel.activeDownloads
     val isScanLoaded = viewModel.isDownloadScanLoaded
+    val historyEntities by viewModel.historyList.collectAsState()
+    val favoriteEntities by viewModel.favoritesList.collectAsState()
     var expandedShows by remember { mutableStateOf(setOf<String>()) }
     var playerPickerFile by remember { mutableStateOf<java.io.File?>(null) }
 
@@ -4462,9 +5473,13 @@ fun DownloadScreen(viewModel: MovieViewModel) {
                 )
                 val scanned = candidateDirs
                     .filter { it.exists() && it.isDirectory }
-                    .flatMap { it.listFiles()?.toList() ?: emptyList() }
-                    .filter { it.extension.equals("mp4", ignoreCase = true) }
-                    .distinctBy { it.name }
+                    .flatMap { dir ->
+                        dir.walkTopDown()
+                            .maxDepth(4)
+                            .filter { it.isFile && it.extension.equals("mp4", ignoreCase = true) }
+                            .toList()
+                    }
+                    .distinctBy { it.absolutePath }
                     .sortedBy { it.name }
 
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
@@ -4696,21 +5711,35 @@ fun DownloadScreen(viewModel: MovieViewModel) {
                             val posterFile = remember(showName, filesForShow) {
                                 val searchDirs = mutableListOf<java.io.File>()
                                 filesForShow.firstOrNull()?.parentFile?.let { searchDirs.add(it) }
+                                filesForShow.firstOrNull()?.parentFile?.parentFile?.let { searchDirs.add(it) }
                                 searchDirs.add(anyFilmDir)
+                                java.io.File(anyFilmDir, safeShowPrefix).let { if (it.exists()) searchDirs.add(it) }
                                 context.getExternalFilesDir(android.os.Environment.DIRECTORY_MOVIES)?.let { searchDirs.add(java.io.File(it, "AnyFilm")) }
                                 searchDirs.add(java.io.File(context.filesDir, "AnyFilm"))
 
                                 val extensions = listOf("jpg", "webp", "png", "jpeg")
 
-                                // 1. Try show-level poster across all candidate folders
+                                // 1. Try show-level poster across all candidate folders (including poster.jpg)
                                 for (d in searchDirs.distinct()) {
+                                    val posterJpg = java.io.File(d, "poster.jpg")
+                                    if (posterJpg.exists() && posterJpg.length() > 0) return@remember posterJpg
                                     for (ext in extensions) {
                                         val p = java.io.File(d, "$safeShowPrefix.$ext")
                                         if (p.exists() && p.length() > 0) return@remember p
                                     }
                                 }
 
-                                // 2. Try episode-level posters for each episode in filesForShow
+                                // 2. Try any image file inside the show folder or episode folder
+                                filesForShow.firstOrNull()?.parentFile?.parentFile?.let { showFolder ->
+                                    val anyShowImage = showFolder.listFiles()?.firstOrNull { it.isFile && it.extension.lowercase() in extensions && it.length() > 0 }
+                                    if (anyShowImage != null) return@remember anyShowImage
+                                }
+                                filesForShow.firstOrNull()?.parentFile?.let { epFolder ->
+                                    val anyEpImage = epFolder.listFiles()?.firstOrNull { it.isFile && it.extension.lowercase() in extensions && it.length() > 0 }
+                                    if (anyEpImage != null) return@remember anyEpImage
+                                }
+
+                                // 3. Try episode-level posters for each episode in filesForShow
                                 for (f in filesForShow) {
                                     val parent = f.parentFile
                                     for (ext in extensions) {
@@ -4725,6 +5754,109 @@ fun DownloadScreen(viewModel: MovieViewModel) {
                                     }
                                 }
                                 null
+                            }
+
+                            val matchedPosterUrl = remember(showName, historyEntities, favoriteEntities) {
+                                val clean = showName.replace(Regex("[^a-zA-Z0-9]"), "").lowercase()
+                                val hist = historyEntities.firstOrNull { h ->
+                                    val hClean = h.name.replace(Regex("[^a-zA-Z0-9]"), "").lowercase()
+                                    hClean.isNotEmpty() && (hClean == clean || clean.contains(hClean) || hClean.contains(clean))
+                                }?.poster?.takeIf { it.isNotBlank() }
+                                val fav = favoriteEntities.firstOrNull { f ->
+                                    val fClean = f.name.replace(Regex("[^a-zA-Z0-9]"), "").lowercase()
+                                    fClean.isNotEmpty() && (fClean == clean || clean.contains(fClean) || fClean.contains(clean))
+                                }?.poster?.takeIf { it.isNotBlank() }
+                                if (hist != null || fav != null) return@remember hist ?: fav
+
+                                val stopWords = setOf("hindi", "english", "dub", "dubbed", "sub", "subbed", "season", "episode", "s1", "s2", "s3", "s4", "s5", "the", "in", "of", "a", "an", "and")
+                                val showWords = showName.lowercase().replace(Regex("[^a-z0-9]"), " ").split(Regex("\\s+")).filter { it.isNotBlank() && it !in stopWords }
+                                if (showWords.size >= 2) {
+                                    val histMatch = historyEntities.firstOrNull { h ->
+                                        val hWords = h.name.lowercase().replace(Regex("[^a-z0-9]"), " ").split(Regex("\\s+")).filter { it.isNotBlank() && it !in stopWords }
+                                        val common = showWords.intersect(hWords.toSet())
+                                        common.size >= 2 && (common.size.toFloat() / showWords.size.toFloat()) >= 0.5f
+                                    }?.poster?.takeIf { it.isNotBlank() }
+                                    if (histMatch != null) return@remember histMatch
+
+                                    val favMatch = favoriteEntities.firstOrNull { f ->
+                                        val fWords = f.name.lowercase().replace(Regex("[^a-z0-9]"), " ").split(Regex("\\s+")).filter { it.isNotBlank() && it !in stopWords }
+                                        val common = showWords.intersect(fWords.toSet())
+                                        common.size >= 2 && (common.size.toFloat() / showWords.size.toFloat()) >= 0.5f
+                                    }?.poster?.takeIf { it.isNotBlank() }
+                                    if (favMatch != null) return@remember favMatch
+                                }
+                                null
+                            }
+
+                            val videoFramePoster = produceState<android.graphics.Bitmap?>(initialValue = null, key1 = showName, key2 = posterFile) {
+                                if (posterFile != null) {
+                                    value = null
+                                    return@produceState
+                                }
+                                val firstVid = filesForShow.firstOrNull { it.extension.lowercase() in listOf("mp4", "mkv", "webm", "avi") && it.exists() }
+                                    ?: filesForShow.firstOrNull { it.exists() }
+                                if (firstVid != null) {
+                                    withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                        try {
+                                            val r = android.media.MediaMetadataRetriever()
+                                            r.setDataSource(firstVid.absolutePath)
+                                            val durStr = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+                                            val durMs = durStr?.toLongOrNull() ?: 60000L
+                                            val timeUs = (durMs * 1000L * 0.15f).toLong().coerceAtLeast(1000000L)
+                                            val bmp = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1) {
+                                                r.getScaledFrameAtTime(timeUs, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 240, 360)
+                                            } else {
+                                                r.getFrameAtTime(timeUs, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                                            }
+                                            r.release()
+                                            if (bmp != null) {
+                                                val targetShowDir = firstVid.parentFile?.parentFile ?: firstVid.parentFile ?: java.io.File(anyFilmDir, safeShowPrefix)
+                                                if (!targetShowDir.exists()) targetShowDir.mkdirs()
+                                                try {
+                                                    val saveFile = java.io.File(targetShowDir, "poster.jpg")
+                                                    saveFile.outputStream().use { out ->
+                                                        bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
+                                                    }
+                                                } catch (_: Throwable) {}
+                                                value = bmp
+                                            }
+                                        } catch (_: Throwable) {}
+                                    }
+                                }
+                            }
+
+                            // Auto-download poster in background if we found a fallback URL so it becomes persistent offline!
+                            LaunchedEffect(matchedPosterUrl, posterFile) {
+                                if (posterFile == null && !matchedPosterUrl.isNullOrBlank()) {
+                                    val targetShowDir = filesForShow.firstOrNull()?.parentFile?.parentFile
+                                        ?: java.io.File(anyFilmDir, safeShowPrefix)
+                                    if (!targetShowDir.exists()) targetShowDir.mkdirs()
+                                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                        try {
+                                            val referer = if (matchedPosterUrl.contains("anifam")) "https://anifam.net/" else if (matchedPosterUrl.contains("tmdb.org")) "https://www.themoviedb.org/" else "https://moviebox.ph/"
+                                            val client = okhttp3.OkHttpClient.Builder()
+                                                .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                                                .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                                                .followRedirects(true)
+                                                .build()
+                                            val req = okhttp3.Request.Builder()
+                                                .url(matchedPosterUrl)
+                                                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+                                                .header("Referer", referer)
+                                                .header("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+                                                .build()
+                                            client.newCall(req).execute().use { resp ->
+                                                if (resp.isSuccessful) {
+                                                    val bytes = resp.body?.bytes()
+                                                    if (bytes != null && bytes.isNotEmpty()) {
+                                                        val showPoster = java.io.File(targetShowDir, "poster.jpg")
+                                                        if (!showPoster.exists()) showPoster.writeBytes(bytes)
+                                                    }
+                                                }
+                                            }
+                                        } catch (_: Exception) {}
+                                    }
+                                }
                             }
                             
                             Column(modifier = Modifier.fillMaxWidth().background(com.example.ui.theme.ObsidianCard, RoundedCornerShape(10.dp))) {
@@ -4741,12 +5873,12 @@ fun DownloadScreen(viewModel: MovieViewModel) {
                                         .padding(horizontal = 10.dp, vertical = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    if (posterFile != null && posterFile.exists()) {
+                                    val activePosterModel: Any? = posterFile ?: matchedPosterUrl ?: videoFramePoster.value
+                                    if (activePosterModel != null) {
                                         AsyncImage(
                                             model = coil.request.ImageRequest.Builder(LocalContext.current)
-                                                .data(posterFile)
+                                                .data(activePosterModel)
                                                 .crossfade(100)
-                                                .memoryCacheKey(posterFile.absolutePath)
                                                 .build(),
                                             contentDescription = "Poster",
                                             modifier = Modifier.size(56.dp, 84.dp).clip(RoundedCornerShape(6.dp)),
@@ -4834,6 +5966,7 @@ fun DownloadScreen(viewModel: MovieViewModel) {
                                                             val showPoster = java.io.File(anyFilmDir, "$safeShowPrefix.jpg")
                                                             if (showPoster.exists()) showPoster.delete()
                                                             anyFilmDir.listFiles()?.filter { it.extension.equals("jpg", ignoreCase = true) && it.nameWithoutExtension.startsWith(safeShowPrefix) }?.forEach { it.delete() }
+                                                            PosterDownloadTracker.markFailed(safeShowPrefix)
                                                             viewModel.scanDownloadedFiles()
                                                         }
                                                     }
@@ -4858,6 +5991,7 @@ fun DownloadScreen(viewModel: MovieViewModel) {
                                                     val showPoster = java.io.File(anyFilmDir, "$safeShowPrefix.jpg")
                                                     if (showPoster.exists()) showPoster.delete()
                                                     anyFilmDir.listFiles()?.filter { it.extension.equals("jpg", ignoreCase = true) && it.nameWithoutExtension.startsWith(safeShowPrefix) }?.forEach { it.delete() }
+                                                    PosterDownloadTracker.markFailed(safeShowPrefix)
                                                     singleFile.delete()
                                                     viewModel.scanDownloadedFiles()
                                                 }
@@ -4898,6 +6032,7 @@ fun DownloadScreen(viewModel: MovieViewModel) {
                                                                 val showPoster = java.io.File(anyFilmDir, "$safeShowPrefix.jpg")
                                                                 if (showPoster.exists()) showPoster.delete()
                                                                 anyFilmDir.listFiles()?.filter { it.extension.equals("jpg", ignoreCase = true) && it.nameWithoutExtension.startsWith(safeShowPrefix) }?.forEach { it.delete() }
+                                                                PosterDownloadTracker.markFailed(safeShowPrefix)
                                                             }
                                                             // When multiple episodes exist, ONLY delete the video file, preserving posters for the remaining episodes
                                                             file.delete()
@@ -5134,8 +6269,168 @@ fun DownloadScreen(viewModel: MovieViewModel) {
     }
 }
 
+fun mapLanguageCodeToName(raw: String): String {
+    val clean = raw.trim().lowercase()
+    val code = clean.substringBefore("-").substringBefore("_").trim()
+    return when (code) {
+        "en", "eng", "english" -> "English"
+        "bn", "ben", "bangla", "bengali" -> "বাংলা"
+        "ar", "ara", "arabic" -> "العَرَبِيةُ"
+        "ur", "urd", "urdu" -> "اُردُو"
+        "hi", "hin", "hindi" -> "हिन्दी"
+        "pa", "pan", "punjabi" -> "ਪੰਜਾਬੀ"
+        "ta", "tam", "tamil" -> "தமிழ்"
+        "te", "tel", "telugu" -> "తెలుగు"
+        "kn", "kan", "kannada" -> "ಕನ್ನಡ"
+        "ml", "mal", "malayalam" -> "മലയാളം"
+        "gu", "guj", "gujarati" -> "ગુજરાતી"
+        "fil", "tl", "tgl", "tagalog", "filipino" -> "Filipino"
+        "fr", "fra", "fre", "french" -> "Français"
+        "id", "ind", "indonesian" -> "Indonesian"
+        "ms", "may", "msa", "malay" -> "Malay"
+        "pt", "por", "portuguese" -> "Português"
+        "ru", "rus", "russian" -> "Русский"
+        "th", "tha", "thai" -> "ภาษาไทย"
+        "vi", "vie", "vietnamese" -> "tiếng Việt"
+        "zh", "zho", "chi", "chinese" -> "中文"
+        "ja", "jpn", "japanese" -> "日本語"
+        "ko", "kor", "korean" -> "한국어"
+        "es", "spa", "spanish" -> "Español"
+        "de", "deu", "ger", "german" -> "Deutsch"
+        "it", "ita", "italian" -> "Italiano"
+        "tr", "tur", "turkish" -> "Türkçe"
+        "el", "ell", "greek" -> "Ελληνικά"
+        "he", "heb", "hebrew" -> "עברית"
+        "pl", "pol", "polish" -> "Polski"
+        "nl", "nld", "dut", "dutch" -> "Nederlands"
+        "in" -> "Indonesian"
+        else -> raw.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+    }
+}
+
+fun detectSubtitleLanguage(
+    file: java.io.File,
+    fallbackIndex: Int,
+    playInfoList: List<com.example.data.model.SubtitleItem>? = null
+): String {
+    try {
+        if (!playInfoList.isNullOrEmpty()) {
+            val name = file.nameWithoutExtension
+            val numMatch = Regex("(?i)sub_?(\\d+)").find(name)
+            if (numMatch != null) {
+                val idx = numMatch.groupValues[1].toIntOrNull()
+                if (idx != null && idx < playInfoList.size) {
+                    val lang = playInfoList[idx].language.trim()
+                    if (lang.isNotBlank()) return lang
+                }
+            }
+        }
+
+        if (!file.exists() || file.length() == 0L) return "Subtitle ${fallbackIndex + 1}"
+
+        val maxBytes = 24576
+        val buffer = ByteArray(maxBytes.coerceAtMost(file.length().toInt()))
+        file.inputStream().use { it.read(buffer) }
+        val text = String(buffer, Charsets.UTF_8)
+
+        val headerMatch = Regex("(?i)(?:Language|lang):\\s*([a-zA-Z\\-_]+)").find(text)
+        if (headerMatch != null) {
+            val code = headerMatch.groupValues[1].lowercase().trim()
+            val mapped = mapLanguageCodeToName(code)
+            if (mapped.isNotBlank() && !mapped.equals(code, ignoreCase = true)) return mapped
+        }
+
+        var arabicCount = 0
+        var bengaliCount = 0
+        var punjabiCount = 0
+        var devanagariCount = 0
+        var tamilCount = 0
+        var teluguCount = 0
+        var kannadaCount = 0
+        var malayalamCount = 0
+        var thaiCount = 0
+        var cyrillicCount = 0
+        var hangulCount = 0
+        var kanaCount = 0
+        var cjkCount = 0
+        var greekCount = 0
+        var hebrewCount = 0
+
+        for (ch in text) {
+            when (ch.code) {
+                in 0x0600..0x06FF, in 0x0750..0x077F, in 0xFB50..0xFDFF, in 0xFE70..0xFEFF -> arabicCount++
+                in 0x0980..0x09FF -> bengaliCount++
+                in 0x0A00..0x0A7F -> punjabiCount++
+                in 0x0900..0x097F -> devanagariCount++
+                in 0x0B80..0x0BFF -> tamilCount++
+                in 0x0C00..0x0C7F -> teluguCount++
+                in 0x0C80..0x0CFF -> kannadaCount++
+                in 0x0D00..0x0D7F -> malayalamCount++
+                in 0x0E00..0x0E7F -> thaiCount++
+                in 0x0400..0x04FF -> cyrillicCount++
+                in 0xAC00..0xD7AF -> hangulCount++
+                in 0x3040..0x30FF -> kanaCount++
+                in 0x4E00..0x9FFF -> cjkCount++
+                in 0x0370..0x03FF -> greekCount++
+                in 0x0590..0x05FF -> hebrewCount++
+            }
+        }
+
+        if (bengaliCount > 10) return "বাংলা"
+        if (punjabiCount > 10) return "ਪੰਜਾਬੀ"
+        if (devanagariCount > 10) return "हिन्दी"
+        if (tamilCount > 10) return "தமிழ்"
+        if (teluguCount > 10) return "తెలుగు"
+        if (kannadaCount > 10) return "ಕನ್ನಡ"
+        if (malayalamCount > 10) return "മലയാളം"
+        if (arabicCount > 10) {
+            val lower = text.lowercase()
+            return if (lower.contains("کو") || lower.contains("کے") || lower.contains("میں") || lower.contains("ہے")) "اُردُو" else "العَرَبِيةُ"
+        }
+        if (thaiCount > 10) return "ภาษาไทย"
+        if (cyrillicCount > 10) return "Русский"
+        if (hangulCount > 10) return "한국어"
+        if (kanaCount > 10) return "日本語"
+        if (cjkCount > 10) return "中文"
+        if (greekCount > 10) return "Ελληνικά"
+        if (hebrewCount > 10) return "עברית"
+
+        val lower = text.lowercase()
+        if (Regex("[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]").containsMatchIn(lower)) {
+            return "tiếng Việt"
+        }
+        if (lower.contains("¿") || lower.contains("¡") || (lower.contains(" el ") && lower.contains(" que ") && lower.contains(" por "))) {
+            return "Español"
+        }
+        if (lower.contains("ç") || (lower.contains(" vous ") && lower.contains(" dans ") && lower.contains(" pour "))) {
+            return "Français"
+        }
+        if (lower.contains("ß") || (lower.contains(" nicht ") && lower.contains(" und ") && lower.contains(" ich "))) {
+            return "Deutsch"
+        }
+        if (lower.contains("ã") || lower.contains("õ") || (lower.contains(" você ") && lower.contains(" não "))) {
+            return "Português"
+        }
+        if (lower.contains(" yang ") && (lower.contains(" tidak ") || lower.contains(" dengan ") || lower.contains(" mereka "))) {
+            return "Indonesian"
+        }
+        if (lower.contains(" ang ") && (lower.contains(" mga ") || lower.contains(" hindi ") || lower.contains(" para sa "))) {
+            return "Filipino"
+        }
+        if (lower.contains(" the ") || lower.contains(" you ") || lower.contains(" to ") || lower.contains(" that ") || lower.contains(" is ") || lower.contains(" it ")) {
+            return "English"
+        }
+    } catch (_: Exception) {}
+    return "Subtitle ${fallbackIndex + 1}"
+}
+
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-fun OfflinePlayerScreen(fileToPlay: java.io.File, onDismiss: () -> Unit) {
+fun OfflinePlayerScreen(
+    fileToPlay: java.io.File,
+    viewModel: com.example.ui.viewmodel.MovieViewModel? = null,
+    onDismiss: () -> Unit
+) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val epMatch = Regex("_S(\\d+)E(\\d+)").find(fileToPlay.nameWithoutExtension)
     val displayTitle = if (epMatch != null) {
@@ -5145,16 +6440,123 @@ fun OfflinePlayerScreen(fileToPlay: java.io.File, onDismiss: () -> Unit) {
         fileToPlay.nameWithoutExtension.replace("_", " ")
     }
 
+    // Discover local subtitle files in this episode's folder
+    val localSubtitles = remember(fileToPlay) {
+        val parent = fileToPlay.parentFile
+        val found = mutableListOf<Pair<java.io.File, String>>()
+        val searchDirs = listOfNotNull(parent, parent?.parentFile).distinct()
+
+        // 1. Try reading subtitles.json from episode or show folder
+        for (dir in searchDirs) {
+            val jsonFile = java.io.File(dir, "subtitles.json")
+            if (jsonFile.exists() && jsonFile.length() > 0) {
+                try {
+                    val content = jsonFile.readText()
+                    val arr = org.json.JSONArray(content)
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.getJSONObject(i)
+                        val lang = obj.optString("language", "")
+                        val fileName = obj.optString("fileName", "")
+                        if (lang.isNotBlank() && fileName.isNotBlank()) {
+                            val candidate = java.io.File(dir, fileName)
+                            val altCandidate = if (parent != null && parent != dir) java.io.File(parent, fileName) else null
+                            val resolvedFile = when {
+                                candidate.exists() && candidate.length() > 0 -> candidate
+                                altCandidate != null && altCandidate.exists() && altCandidate.length() > 0 -> altCandidate
+                                else -> null
+                            }
+                            if (resolvedFile != null) {
+                                found.add(Pair(resolvedFile, lang))
+                            }
+                        }
+                    }
+                    if (found.isNotEmpty()) break
+                } catch (_: Exception) {}
+            }
+        }
+
+        // 2. If no subtitles found via subtitles.json, scan subtitle files on disk
+        if (found.isEmpty() && parent != null) {
+            val files = parent.listFiles { f ->
+                f.isFile && (f.extension.equals("vtt", ignoreCase = true) || f.extension.equals("srt", ignoreCase = true))
+            }?.sortedBy { it.name } ?: emptyList()
+
+            for ((index, f) in files.withIndex()) {
+                val name = f.nameWithoutExtension
+                val isLegacyNumeric = name.matches(Regex("(?i)^sub_\\d+$")) || name.matches(Regex("^\\d+$"))
+
+                val display = if (isLegacyNumeric) {
+                    detectSubtitleLanguage(f, index, viewModel?.playInfo?.subTitleList)
+                } else {
+                    val rawLang = if (name.contains("__")) {
+                        name.substringAfterLast("__")
+                    } else if (name.contains("_") && !name.startsWith("sub_")) {
+                        name.substringAfterLast("_")
+                    } else {
+                        name
+                    }
+                    mapLanguageCodeToName(rawLang)
+                }
+                found.add(Pair(f, display))
+            }
+
+            // Persist detected subtitles into subtitles.json so future loads are instant
+            if (found.isNotEmpty()) {
+                try {
+                    val arr = org.json.JSONArray()
+                    for ((file, lang) in found) {
+                        val item = org.json.JSONObject()
+                        item.put("language", lang)
+                        item.put("fileName", file.name)
+                        arr.put(item)
+                    }
+                    val jsonFile = java.io.File(parent, "subtitles.json")
+                    jsonFile.writeText(arr.toString())
+                } catch (_: Throwable) {}
+            }
+        }
+
+        // Make display names unique if duplicates occur
+        val uniqueFound = mutableListOf<Pair<java.io.File, String>>()
+        val countMap = mutableMapOf<String, Int>()
+        for ((file, lang) in found) {
+            val count = countMap.getOrDefault(lang, 0) + 1
+            countMap[lang] = count
+            val finalName = if (count > 1) "$lang ($count)" else lang
+            uniqueFound.add(Pair(file, finalName))
+        }
+        uniqueFound
+    }
+
+    var selectedOfflineSub by remember { mutableStateOf<Pair<java.io.File, String>?>(null) }
+    var selectedOfflineSpeed by remember { mutableStateOf(1.0f) }
+    var activeOfflineSheet by remember { mutableStateOf<String?>(null) } // "player_settings", "subtitle", "speed"
+
     var isOfflineControllerVisible by remember { mutableStateOf(true) }
     var isOfflinePlaying by remember { mutableStateOf(true) }
     var currentOfflineProgressMs by remember { mutableStateOf(0L) }
     var offlineDurationMs by remember { mutableStateOf(0L) }
     var isOfflineBuffering by remember { mutableStateOf(false) }
+    var isOfflineSeeking by remember { mutableStateOf(false) }
+    var offlineSeekPositionMs by remember { mutableStateOf(0L) }
+    var offlineSeekFraction by remember { mutableStateOf(0f) }
+    var lastOfflineSeekFinishedTime by remember { mutableStateOf(0L) }
+
+    val offlinePosterFile = remember(fileToPlay) {
+        val candidateDirs = listOfNotNull(fileToPlay.parentFile, fileToPlay.parentFile?.parentFile)
+        for (d in candidateDirs) {
+            val p = java.io.File(d, "poster.jpg")
+            if (p.exists() && p.length() > 0) return@remember p
+        }
+        null
+    }
 
     // Double-Tap Gesture Indicator States
     var offlineDoubleTapSide by remember { mutableStateOf<String?>(null) }
     var offlineDoubleTapText by remember { mutableStateOf<String?>(null) }
     var offlineGestureTrigger by remember { mutableStateOf(0L) }
+    var isOfflineZoomed by remember { mutableStateOf(false) }
+    var offlinePlayerViewRef by remember { mutableStateOf<androidx.media3.ui.PlayerView?>(null) }
 
     val offlineConfiguration = androidx.compose.ui.platform.LocalConfiguration.current
     val isOfflineFullscreen = offlineConfiguration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
@@ -5162,9 +6564,8 @@ fun OfflinePlayerScreen(fileToPlay: java.io.File, onDismiss: () -> Unit) {
     val isOfflineInPip = offlineActivity?.isInPictureInPictureMode ?: false
 
     BackHandler {
-        if (isOfflineFullscreen) {
-            offlineActivity?.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-            offlineActivity?.window?.decorView?.systemUiVisibility = android.view.View.SYSTEM_UI_FLAG_VISIBLE
+        if (activeOfflineSheet != null) {
+            activeOfflineSheet = null
         } else {
             offlineActivity?.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             offlineActivity?.window?.decorView?.systemUiVisibility = android.view.View.SYSTEM_UI_FLAG_VISIBLE
@@ -5173,17 +6574,58 @@ fun OfflinePlayerScreen(fileToPlay: java.io.File, onDismiss: () -> Unit) {
     }
 
     val exoPlayer = remember(fileToPlay) {
+        val mediaItemBuilder = androidx.media3.common.MediaItem.Builder()
+            .setUri(android.net.Uri.fromFile(fileToPlay))
+
+        if (localSubtitles.isNotEmpty()) {
+            val subConfigs = localSubtitles.map { (subFile, display) ->
+                val mimeType = if (subFile.extension.equals("vtt", ignoreCase = true)) {
+                    androidx.media3.common.MimeTypes.TEXT_VTT
+                } else {
+                    androidx.media3.common.MimeTypes.APPLICATION_SUBRIP
+                }
+                androidx.media3.common.MediaItem.SubtitleConfiguration.Builder(android.net.Uri.fromFile(subFile))
+                    .setMimeType(mimeType)
+                    .setLanguage(display)
+                    .setLabel(display)
+                    .build()
+            }
+            mediaItemBuilder.setSubtitleConfigurations(subConfigs)
+        }
+
         androidx.media3.exoplayer.ExoPlayer.Builder(context).build().apply {
-            setMediaItem(androidx.media3.common.MediaItem.fromUri(android.net.Uri.fromFile(fileToPlay)))
+            setMediaItem(mediaItemBuilder.build())
             prepare()
             playWhenReady = true
         }
     }
 
+    // Default subtitles to disabled until user picks one in settings
+    LaunchedEffect(exoPlayer) {
+        exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
+            .buildUpon()
+            .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, true)
+            .build()
+    }
+
     DisposableEffect(fileToPlay) {
+        offlineActivity?.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        offlineActivity?.window?.decorView?.systemUiVisibility = (
+            android.view.View.SYSTEM_UI_FLAG_FULLSCREEN
+            or android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+            or android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+        )
         val listener = object : androidx.media3.common.Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
                 isOfflineBuffering = (state == androidx.media3.common.Player.STATE_BUFFERING)
+                if (state == androidx.media3.common.Player.STATE_READY) {
+                    val dur = exoPlayer.duration
+                    if (dur > 0) offlineDurationMs = dur
+                }
+            }
+            override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
+                val dur = exoPlayer.duration
+                if (dur > 0) offlineDurationMs = dur
             }
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
                 isOfflinePlaying = playWhenReady
@@ -5198,18 +6640,15 @@ fun OfflinePlayerScreen(fileToPlay: java.io.File, onDismiss: () -> Unit) {
         }
     }
 
-    // Keep system bars hidden when in landscape fullscreen
-    LaunchedEffect(isOfflineFullscreen) {
+    // Keep orientation strictly locked to horizontal landscape & keep system bars hidden
+    LaunchedEffect(Unit) {
         if (offlineActivity != null) {
-            if (isOfflineFullscreen) {
-                offlineActivity.window.decorView.systemUiVisibility = (
-                    android.view.View.SYSTEM_UI_FLAG_FULLSCREEN
-                    or android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                    or android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                )
-            } else {
-                offlineActivity.window.decorView.systemUiVisibility = android.view.View.SYSTEM_UI_FLAG_VISIBLE
-            }
+            offlineActivity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            offlineActivity.window.decorView.systemUiVisibility = (
+                android.view.View.SYSTEM_UI_FLAG_FULLSCREEN
+                or android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                or android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+            )
         }
     }
 
@@ -5217,11 +6656,13 @@ fun OfflinePlayerScreen(fileToPlay: java.io.File, onDismiss: () -> Unit) {
     LaunchedEffect(isOfflinePlaying) {
         if (isOfflinePlaying) {
             while (true) {
-                val pos = exoPlayer.currentPosition
-                val dur = exoPlayer.duration
-                if (dur > 0) {
-                    currentOfflineProgressMs = pos
-                    offlineDurationMs = dur
+                if (!isOfflineSeeking && System.currentTimeMillis() - lastOfflineSeekFinishedTime > 1200L) {
+                    val pos = exoPlayer.currentPosition
+                    val dur = exoPlayer.duration
+                    if (dur > 0) {
+                        currentOfflineProgressMs = pos
+                        offlineDurationMs = dur
+                    }
                 }
                 delay(1000)
             }
@@ -5229,8 +6670,8 @@ fun OfflinePlayerScreen(fileToPlay: java.io.File, onDismiss: () -> Unit) {
     }
 
     // Auto-hide controller
-    LaunchedEffect(isOfflineControllerVisible, isOfflinePlaying) {
-        if (isOfflineControllerVisible && isOfflinePlaying) {
+    LaunchedEffect(isOfflineControllerVisible, isOfflinePlaying, isOfflineSeeking) {
+        if (isOfflineControllerVisible && isOfflinePlaying && !isOfflineSeeking) {
             delay(4000)
             isOfflineControllerVisible = false
         }
@@ -5249,6 +6690,7 @@ fun OfflinePlayerScreen(fileToPlay: java.io.File, onDismiss: () -> Unit) {
         androidx.compose.ui.viewinterop.AndroidView(
             factory = { ctx ->
                 val view = android.view.LayoutInflater.from(ctx).inflate(com.example.R.layout.texture_player_view, null) as androidx.media3.ui.PlayerView
+                offlinePlayerViewRef = view
                 view.keepScreenOn = true
                 view.isHapticFeedbackEnabled = false
                 view.isSoundEffectsEnabled = false
@@ -5444,6 +6886,9 @@ fun OfflinePlayerScreen(fileToPlay: java.io.File, onDismiss: () -> Unit) {
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
+                    IconButton(onClick = { activeOfflineSheet = "player_settings" }) {
+                        Icon(Icons.Filled.Settings, contentDescription = "Playback Settings", tint = Color.White)
+                    }
                 }
 
                 // Center Buffering Spinner
@@ -5454,112 +6899,758 @@ fun OfflinePlayerScreen(fileToPlay: java.io.File, onDismiss: () -> Unit) {
                     )
                 }
 
-                // Bottom Controls Row: Play/Pause, Seekbar, Duration, PIP, Fullscreen
-                Row(
+                // Bottom Controls: Floating Seek Preview + Controls Row
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .align(Alignment.BottomStart)
                         .background(
                             Brush.verticalGradient(
-                                colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.65f))
+                                colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.7f))
                             )
                         )
                         .navigationBarsPadding()
                         .clickable(enabled = false) {}
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Play/Pause Button
-                    IconButton(
-                        onClick = {
-                            if (exoPlayer.isPlaying) {
-                                exoPlayer.pause()
-                                isOfflinePlaying = false
-                            } else {
-                                exoPlayer.play()
-                                isOfflinePlaying = true
-                            }
-                        },
-                        modifier = Modifier.size(32.dp)
+                    // Floating Seek Preview Popup
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = isOfflineSeeking,
+                        enter = fadeIn(tween(120)) + scaleIn(tween(120)),
+                        exit = fadeOut(tween(120))
                     ) {
-                        Icon(
-                            if (isOfflinePlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                            contentDescription = "Play/Pause",
-                            tint = Color.White,
-                            modifier = Modifier.size(24.dp)
-                        )
-                    }
-
-                    // Progress Slider
-                    Slider(
-                        value = currentOfflineProgressMs.toFloat(),
-                        onValueChange = { currentOfflineProgressMs = it.toLong() },
-                        onValueChangeFinished = { exoPlayer.seekTo(currentOfflineProgressMs) },
-                        valueRange = 0f..maxOf(1f, offlineDurationMs.toFloat()),
-                        colors = SliderDefaults.colors(
-                            thumbColor = Color.White,
-                            activeTrackColor = Color.White,
-                            inactiveTrackColor = Color.Gray.copy(alpha = 0.4f)
-                        ),
-                        modifier = Modifier
-                            .weight(1f)
-                            .padding(horizontal = 8.dp)
-                    )
-
-                    // Position / Duration text
-                    Text(
-                        text = "${formatTime(currentOfflineProgressMs)}/${formatTime(offlineDurationMs)}",
-                        color = Color.White,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-
-                    Spacer(modifier = Modifier.width(12.dp))
-
-                    // PIP Button
-                    IconButton(
-                        onClick = {
-                            if (offlineActivity != null && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                                offlineActivity.enterPictureInPictureMode(
-                                    android.app.PictureInPictureParams.Builder().build()
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp),
+                            verticalAlignment = Alignment.Bottom
+                        ) {
+                            Spacer(modifier = Modifier.size(32.dp))
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(horizontal = 8.dp)
+                            ) {
+                                SeekPreviewPopup(
+                                    seekMs = offlineSeekPositionMs,
+                                    fraction = offlineSeekFraction,
+                                    previewSource = fileToPlay
                                 )
                             }
-                        },
-                        modifier = Modifier.size(32.dp)
-                    ) {
-                        Icon(
-                            Icons.Filled.PictureInPicture,
-                            contentDescription = "PiP Mode",
-                            tint = Color.White,
-                            modifier = Modifier.size(20.dp)
-                        )
+                            Spacer(modifier = Modifier.width(120.dp))
+                        }
                     }
 
-                    Spacer(modifier = Modifier.width(8.dp))
-
-                    // Fullscreen Toggle Button
-                    IconButton(
-                        onClick = {
-                            if (offlineActivity != null) {
-                                if (!isOfflineFullscreen) {
-                                    offlineActivity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-                                    offlineActivity.window.decorView.systemUiVisibility = (
-                                        android.view.View.SYSTEM_UI_FLAG_FULLSCREEN
-                                        or android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                                        or android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Play/Pause Button
+                        IconButton(
+                            onClick = {
+                                if (exoPlayer.isPlaying) {
+                                    exoPlayer.pause()
+                                    isOfflinePlaying = false
                                 } else {
-                                    offlineActivity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-                                    offlineActivity.window.decorView.systemUiVisibility = android.view.View.SYSTEM_UI_FLAG_VISIBLE
+                                    exoPlayer.play()
+                                    isOfflinePlaying = true
+                                }
+                            },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(
+                                if (isOfflinePlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                contentDescription = "Play/Pause",
+                                tint = Color.White,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+
+                        // Video Progress Bar (Thin, crisp line matching online player)
+                        VideoProgressBar(
+                            currentPositionMs = if (isOfflineSeeking) offlineSeekPositionMs else currentOfflineProgressMs,
+                            durationMs = offlineDurationMs,
+                            onSeek = { offlineSeekPositionMs = it },
+                            onSeekFinished = { targetMs ->
+                                lastOfflineSeekFinishedTime = System.currentTimeMillis()
+                                currentOfflineProgressMs = targetMs
+                                exoPlayer.seekTo(targetMs)
+                            },
+                            onSeekingChanged = { seeking, ms, frac ->
+                                isOfflineSeeking = seeking
+                                if (seeking) {
+                                    isOfflineControllerVisible = true
+                                }
+                                offlineSeekPositionMs = ms
+                                offlineSeekFraction = frac
+                            },
+                            enabled = true,
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(horizontal = 8.dp)
+                        )
+
+                        // Position / Duration text
+                        Text(
+                            text = "${formatTime(if (isOfflineSeeking) offlineSeekPositionMs else currentOfflineProgressMs)}/${formatTime(offlineDurationMs)}",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+
+                        Spacer(modifier = Modifier.width(12.dp))
+
+                        // PIP Button
+                        IconButton(
+                            onClick = {
+                                if (offlineActivity != null && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                                    offlineActivity.enterPictureInPictureMode(
+                                        android.app.PictureInPictureParams.Builder().build()
+                                    )
+                                }
+                            },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(
+                                Icons.Filled.PictureInPicture,
+                                contentDescription = "PiP Mode",
+                                tint = Color.White,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(8.dp))
+
+                        // Aspect Ratio Toggle (Fit / Zoom to fill screen) - always strictly locked to horizontal
+                        IconButton(
+                            onClick = {
+                                isOfflineZoomed = !isOfflineZoomed
+                                offlinePlayerViewRef?.resizeMode = if (isOfflineZoomed) {
+                                    androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                                } else {
+                                    androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                }
+                            },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (isOfflineZoomed) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
+                                contentDescription = "Toggle Aspect Ratio",
+                                tint = Color.White,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Offline Playback Settings Sheet (Subtitles & Playback Speed only)
+        if (activeOfflineSheet != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .clickable { activeOfflineSheet = null }
+            ) {
+                Card(
+                    modifier = Modifier
+                        .align(if (isOfflineFullscreen) Alignment.Center else Alignment.BottomCenter)
+                        .padding(if (isOfflineFullscreen) 24.dp else 0.dp)
+                        .fillMaxWidth(if (isOfflineFullscreen) 0.6f else 1f)
+                        .clickable(enabled = false) {},
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E20)),
+                    shape = if (isOfflineFullscreen) RoundedCornerShape(16.dp) else RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(20.dp)
+                    ) {
+                        // Header row
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = when (activeOfflineSheet) {
+                                    "player_settings" -> "Playback Settings"
+                                    "subtitle" -> "Select subtitle"
+                                    "speed" -> "Playback speed"
+                                    else -> ""
+                                },
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFE2E8F0)
+                            )
+                            IconButton(onClick = { activeOfflineSheet = null }) {
+                                Icon(Icons.Filled.Close, contentDescription = "Close", tint = Color(0xFF94A3B8))
+                            }
+                        }
+
+                        HorizontalDivider(
+                            modifier = Modifier.padding(vertical = 12.dp),
+                            color = Color.Gray.copy(alpha = 0.2f)
+                        )
+
+                        if (activeOfflineSheet == "player_settings") {
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                // 1. Subtitles
+                                val currentSubText = selectedOfflineSub?.second ?: "Off"
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { activeOfflineSheet = "subtitle" }
+                                        .padding(vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Filled.ClosedCaption, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+                                        Spacer(modifier = Modifier.width(16.dp))
+                                        Text("Subtitles", color = Color.White, fontSize = 14.sp)
+                                    }
+                                    Text(currentSubText, color = CinematicRed, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                                }
+
+                                // 2. Playback Speed
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { activeOfflineSheet = "speed" }
+                                        .padding(vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Filled.Speed, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+                                        Spacer(modifier = Modifier.width(16.dp))
+                                        Text("Playback Speed", color = Color.White, fontSize = 14.sp)
+                                    }
+                                    Text("${selectedOfflineSpeed}x", color = CinematicRed, fontSize = 14.sp, fontWeight = FontWeight.Bold)
                                 }
                             }
-                        },
-                        modifier = Modifier.size(32.dp)
+                        } else if (activeOfflineSheet == "subtitle") {
+                            val subtitleOptions = listOf<Pair<java.io.File?, String>>(Pair(null, "None")) + localSubtitles.map { Pair(it.first, it.second) }
+                            val chunked = subtitleOptions.chunked(2)
+                            LazyColumn(
+                                verticalArrangement = Arrangement.spacedBy(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                items(chunked.size) { index ->
+                                    val rowItems = chunked[index]
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                    ) {
+                                        rowItems.forEach { subItem ->
+                                            val isSelected = (subItem.first == selectedOfflineSub?.first)
+                                            Button(
+                                                onClick = {
+                                                    selectedOfflineSub = if (subItem.first == null) null else Pair(subItem.first!!, subItem.second)
+                                                    if (subItem.first == null) {
+                                                        exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
+                                                            .buildUpon()
+                                                            .clearOverridesOfType(androidx.media3.common.C.TRACK_TYPE_TEXT)
+                                                            .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, true)
+                                                            .build()
+                                                    } else {
+                                                        val paramsBuilder = exoPlayer.trackSelectionParameters
+                                                            .buildUpon()
+                                                            .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, false)
+                                                            .setPreferredTextLanguage(subItem.second)
+
+                                                        val textTracks = exoPlayer.currentTracks.groups.filter { it.type == androidx.media3.common.C.TRACK_TYPE_TEXT }
+                                                        for (group in textTracks) {
+                                                            for (i in 0 until group.length) {
+                                                                val format = group.getTrackFormat(i)
+                                                                if (format.label == subItem.second || format.language == subItem.second) {
+                                                                    paramsBuilder.setOverrideForType(androidx.media3.common.TrackSelectionOverride(group.mediaTrackGroup, i))
+                                                                    break
+                                                                }
+                                                            }
+                                                        }
+                                                        exoPlayer.trackSelectionParameters = paramsBuilder.build()
+                                                    }
+                                                    activeOfflineSheet = null
+                                                },
+                                                colors = ButtonDefaults.buttonColors(
+                                                    containerColor = if (isSelected) Color(0xFF115E59) else Color(0xFF2D2D30)
+                                                ),
+                                                shape = RoundedCornerShape(8.dp),
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .height(48.dp)
+                                            ) {
+                                                Text(
+                                                    text = subItem.second,
+                                                    color = if (isSelected) Color(0xFF2DD4BF) else Color.White,
+                                                    fontSize = 13.sp,
+                                                    fontWeight = FontWeight.Medium,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                        }
+                                        if (rowItems.size == 1) {
+                                            Spacer(modifier = Modifier.weight(1f))
+                                        }
+                                    }
+                                }
+                            }
+                        } else if (activeOfflineSheet == "speed") {
+                            val speedOptions = listOf("0.5x", "0.75x", "1.0x (Normal)", "1.25x", "1.5x", "2.0x")
+                            val chunked = speedOptions.chunked(2)
+                            LazyColumn(
+                                verticalArrangement = Arrangement.spacedBy(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                items(chunked.size) { index ->
+                                    val rowItems = chunked[index]
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                    ) {
+                                        rowItems.forEach { item ->
+                                            val speedVal = when (item) {
+                                                "0.5x" -> 0.5f
+                                                "0.75x" -> 0.75f
+                                                "1.0x (Normal)" -> 1.0f
+                                                "1.25x" -> 1.25f
+                                                "1.5x" -> 1.5f
+                                                "2.0x" -> 2.0f
+                                                else -> 1.0f
+                                            }
+                                            val isSelected = Math.abs(selectedOfflineSpeed - speedVal) < 0.05f
+                                            Button(
+                                                onClick = {
+                                                    selectedOfflineSpeed = speedVal
+                                                    exoPlayer.setPlaybackSpeed(speedVal)
+                                                    activeOfflineSheet = null
+                                                },
+                                                colors = ButtonDefaults.buttonColors(
+                                                    containerColor = if (isSelected) Color(0xFF115E59) else Color(0xFF2D2D30)
+                                                ),
+                                                shape = RoundedCornerShape(8.dp),
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .height(48.dp)
+                                            ) {
+                                                Text(
+                                                    text = item,
+                                                    color = if (isSelected) Color(0xFF2DD4BF) else Color.White,
+                                                    fontSize = 13.sp,
+                                                    fontWeight = FontWeight.Medium
+                                                )
+                                            }
+                                        }
+                                        if (rowItems.size == 1) {
+                                            Spacer(modifier = Modifier.weight(1f))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun W2GPartyPlayerBottomView(
+    room: com.example.data.model.W2GRoomDetail,
+    viewModel: MovieViewModel,
+    context: android.content.Context,
+    onSyncWithHost: () -> Unit = {}
+) {
+    var chatMessageInput by remember { mutableStateOf("") }
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+
+    androidx.compose.runtime.LaunchedEffect(viewModel.w2gMessages.size) {
+        if (viewModel.w2gMessages.isNotEmpty()) {
+            listState.animateScrollToItem(viewModel.w2gMessages.size - 1)
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF0F0F12))
+    ) {
+        // 1. Status Bar directly below video player (matches AniFam official W2G UI)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF141418))
+                .padding(horizontal = 14.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // [LIVE] badge
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color(0xFF22C55E))
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            ) {
+                Text(
+                    text = "LIVE",
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            if (!viewModel.isHostingW2G && viewModel.isGuestWatchingOnOwn) {
+                // "Watching on your own" + [Sync with host] button (matches AniFam official app)
+                Text(
+                    text = "Watching on your own",
+                    color = Color.White.copy(alpha = 0.9f),
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+
+                Spacer(modifier = Modifier.weight(1f))
+
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color(0xFFEF4444),
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(16.dp))
+                        .clickable { onSyncWithHost() }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
-                            imageVector = if (isOfflineFullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
-                            contentDescription = "Toggle Fullscreen",
+                            imageVector = Icons.Filled.Refresh,
+                            contentDescription = "Sync with host",
                             tint = Color.White,
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Sync with host",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            } else {
+                // [HOST] or [GUEST] badge
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(if (viewModel.isHostingW2G) Color(0xFFEF4444) else Color(0xFF3B82F6))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        text = if (viewModel.isHostingW2G) "HOST" else "GUEST",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                // Playback control description
+                Text(
+                    text = if (viewModel.isHostingW2G) "You control playback for everyone" else "Playback is synced to the host",
+                    color = Color.White.copy(alpha = 0.85f),
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            // Viewers count
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(start = 8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Group,
+                    contentDescription = "Members",
+                    tint = Color.White.copy(alpha = 0.7f),
+                    modifier = Modifier.size(15.dp)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = "${room.members ?: 1}",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
+
+        // Host Avatar & Room Code strip
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            // Host Avatar with live indicator dot
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(modifier = Modifier.size(34.dp)) {
+                    val hostAvatar = room.host?.fullAvatarUrl ?: ""
+                    if (hostAvatar.isNotEmpty()) {
+                        AsyncImage(
+                            model = hostAvatar,
+                            contentDescription = room.host?.name,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clip(CircleShape)
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color(0xFF27272A), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = (room.host?.name ?: "H").take(1).uppercase(),
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                    // Red dot indicator
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .background(Color(0xFFEF4444), CircleShape)
+                            .border(1.5.dp, Color(0xFF0F0F12), CircleShape)
+                            .align(Alignment.BottomEnd)
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                Text(
+                    text = room.host?.name ?: "Host",
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+
+            // Room Code with Copy
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color(0xFF1E1F24))
+                    .clickable {
+                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                        val clip = android.content.ClipData.newPlainText("Room Code", room.public_id)
+                        clipboard?.setPrimaryClip(clip)
+                        Toast.makeText(context, "Code copied: ${room.public_id}", Toast.LENGTH_SHORT).show()
+                    }
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    text = "Code: ${room.public_id}",
+                    color = Color(0xFFF87171),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.5.sp
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Icon(
+                    imageVector = Icons.Filled.ContentCopy,
+                    contentDescription = "Copy Code",
+                    tint = TextSecondary,
+                    modifier = Modifier.size(13.dp)
+                )
+            }
+        }
+
+        HorizontalDivider(color = Color.White.copy(alpha = 0.06f), thickness = 0.8.dp)
+
+        // 2. Chat messages area (taking full vertical height weight(1f))
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+        ) {
+            if (viewModel.w2gMessages.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(top = 40.dp),
+                    contentAlignment = Alignment.TopCenter
+                ) {
+                    Text(
+                        text = "No messages yet. Say hi!",
+                        color = Color.White.copy(alpha = 0.45f),
+                        fontSize = 13.sp
+                    )
+                }
+            } else {
+                androidx.compose.foundation.lazy.LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(viewModel.w2gMessages) { msg ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            val avatar = msg.user?.fullAvatarUrl ?: ""
+                            if (avatar.isNotEmpty()) {
+                                AsyncImage(
+                                    model = avatar,
+                                    contentDescription = msg.user?.name,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .clip(CircleShape)
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .background(Color(0xFFEF4444), CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = (msg.user?.name ?: "U").take(1).uppercase(),
+                                        color = Color.White,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.width(8.dp))
+
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = msg.user?.name ?: "Member",
+                                    color = Color.White.copy(alpha = 0.8f),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Surface(
+                                    color = Color(0xFF1E1F24),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Text(
+                                        text = msg.body,
+                                        color = TextPrimary,
+                                        fontSize = 13.sp,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Bottom comment bar (pinned right above phone's back / navigation bar)
+        Surface(
+            color = Color(0xFF0F0F12),
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Pill input box
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .background(Color(0xFF1E1F24), CircleShape)
+                        .border(1.dp, Color.White.copy(alpha = 0.1f), CircleShape)
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    androidx.compose.foundation.text.BasicTextField(
+                        value = chatMessageInput,
+                        onValueChange = {
+                            if (it.length <= (room.chat?.max_length ?: 200)) {
+                                chatMessageInput = it
+                            }
+                        },
+                        textStyle = androidx.compose.ui.text.TextStyle(
+                            color = Color.White,
+                            fontSize = 14.sp
+                        ),
+                        singleLine = true,
+                        cursorBrush = androidx.compose.ui.graphics.SolidColor(CinematicRed),
+                        modifier = Modifier.fillMaxWidth(),
+                        decorationBox = { innerTextField ->
+                            if (chatMessageInput.isEmpty()) {
+                                Text(
+                                    text = if (viewModel.w2gSlowModeRemaining > 0) "Slow mode (${viewModel.w2gSlowModeRemaining}s)..." else "Message",
+                                    color = Color.White.copy(alpha = 0.4f),
+                                    fontSize = 14.sp
+                                )
+                            }
+                            innerTextField()
+                        }
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                // Send Button with red paper plane or slow mode countdown
+                val isSendEnabled = chatMessageInput.isNotBlank() && viewModel.w2gSlowModeRemaining == 0
+                IconButton(
+                    onClick = {
+                        val toSend = chatMessageInput.trim()
+                        if (toSend.isNotEmpty()) {
+                            viewModel.sendW2GMessage(
+                                text = toSend,
+                                onError = { err -> Toast.makeText(context, err, Toast.LENGTH_SHORT).show() }
+                            )
+                            chatMessageInput = ""
+                        }
+                    },
+                    enabled = isSendEnabled,
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    if (viewModel.w2gSlowModeRemaining > 0) {
+                        Text(
+                            text = "${viewModel.w2gSlowModeRemaining}s",
+                            color = TextSecondary,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Filled.Send,
+                            contentDescription = "Send",
+                            tint = if (chatMessageInput.isNotBlank()) Color(0xFFEF4444) else Color.White.copy(alpha = 0.25f),
                             modifier = Modifier.size(22.dp)
                         )
                     }

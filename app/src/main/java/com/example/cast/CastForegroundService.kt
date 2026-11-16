@@ -27,8 +27,13 @@ class CastForegroundService : Service() {
         const val ACTION_STOP = "com.example.cast.action.STOP"
         const val EXTRA_TITLE = "extra_title"
 
+        @Volatile
+        var isCasting: Boolean = false
+            private set
+
         fun start(context: Context, title: String = "Casting to TV") {
             try {
+                isCasting = true
                 val intent = Intent(context, CastForegroundService::class.java).apply {
                     action = ACTION_START
                     putExtra(EXTRA_TITLE, title)
@@ -45,6 +50,7 @@ class CastForegroundService : Service() {
 
         fun stop(context: Context) {
             try {
+                isCasting = false
                 val intent = Intent(context, CastForegroundService::class.java).apply {
                     action = ACTION_STOP
                 }
@@ -117,13 +123,26 @@ class CastForegroundService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
+            isCasting = false
             stopForegroundService()
             return START_NOT_STICKY
         }
 
+        isCasting = true
+        // Guarantee local proxy server on port 3000 is running and stays alive while casting
+        try {
+            com.example.data.network.LocalMovieBoxServer.getInstance(applicationContext).start()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start LocalMovieBoxServer", e)
+        }
+
         val title = intent?.getStringExtra(EXTRA_TITLE) ?: "Casting to TV"
         val notification = buildNotification(title)
-        startForeground(NOTIFICATION_ID, notification)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
         return START_STICKY
     }
 
@@ -154,6 +173,7 @@ class CastForegroundService : Service() {
     }
 
     private fun stopForegroundService() {
+        isCasting = false
         try {
             if (wakeLock?.isHeld == true) wakeLock?.release()
             if (wifiLock?.isHeld == true) wifiLock?.release()

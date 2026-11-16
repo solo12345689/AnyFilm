@@ -18,8 +18,8 @@ android {
     applicationId = "com.anyfilm.app"
     minSdk = 24
     targetSdk = 36
-    versionCode = 8
-    versionName = "4.3"
+    versionCode = 9
+    versionName = "4.4"
   }
 
   val keystorePropertiesFile = rootProject.file("key.properties")

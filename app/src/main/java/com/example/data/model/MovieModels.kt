@@ -109,7 +109,9 @@ data class SearchResponse(
 data class CategorySection(
     val title: String = "",
     val type: String = "SUBJECTS_MOVIE",
-    val items: List<MovieSubject> = emptyList()
+    val items: List<MovieSubject> = emptyList(),
+    val deepLink: String = "",
+    val rankingListId: String = ""
 )
 
 @JsonClass(generateAdapter = true)

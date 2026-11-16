@@ -83,8 +83,11 @@ object TmdbOttService {
         .readTimeout(15, TimeUnit.SECONDS)
         .build()
 
-    private const val API_KEY_1 = "3e20e76d6d210b6cb128d17d233b64dc"
-    private const val API_KEY_2 = "203f18d6bdc16a8e9a1fa73a6c6da6bc"
+    private val API_KEYS = listOf(
+        "15d2ea6d0dc1d476efbca3eba2b9bbfb",
+        "3e20e76d6d210b6cb128d17d233b64dc",
+        "203f18d6bdc16a8e9a1fa73a6c6da6bc"
+    )
 
     val allPlatforms = listOf(
         OttPlatform(
@@ -165,11 +168,11 @@ object TmdbOttService {
     }
 
     private fun queryTmdb(endpoint: String, params: String): List<MovieSubject> {
-        val url1 = "https://api.themoviedb.org/3/$endpoint?api_key=$API_KEY_1&$params"
-        var json = makeRequest(url1)
-        if (json == null) {
-            val url2 = "https://api.themoviedb.org/3/$endpoint?api_key=$API_KEY_2&$params"
-            json = makeRequest(url2)
+        var json: String? = null
+        for (key in API_KEYS) {
+            val url = "https://api.themoviedb.org/3/$endpoint?api_key=$key&$params"
+            json = makeRequest(url)
+            if (json != null) break
         }
         if (json == null) return emptyList()
 

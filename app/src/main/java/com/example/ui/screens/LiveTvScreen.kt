@@ -184,6 +184,55 @@ private fun fetchZioChannels(): Pair<Map<String, ZioChannelInfo>, Map<String, Zi
     return Pair(cachedZioChannels ?: emptyMap(), cachedZioChannelsByName ?: emptyMap())
 }
 
+private var cachedManishChannels: List<ManishWorkerChannelItem>? = null
+private var cachedManishById: Map<String, ManishWorkerChannelItem>? = null
+private var cachedManishByName: Map<String, ManishWorkerChannelItem>? = null
+private var manishCacheFetchTime: Long = 0L
+
+private fun fetchManishWorkerChannels(): Triple<List<ManishWorkerChannelItem>, Map<String, ManishWorkerChannelItem>, Map<String, ManishWorkerChannelItem>> {
+    val now = System.currentTimeMillis()
+    val existingList = cachedManishChannels
+    val existingById = cachedManishById
+    val existingByName = cachedManishByName
+    if (existingList != null && existingById != null && existingByName != null && (now - manishCacheFetchTime < 10 * 60 * 1000L)) {
+        return Triple(existingList, existingById, existingByName)
+    }
+
+    try {
+        val req = Request.Builder()
+            .url("https://jiotv-api.manishjaiswal.workers.dev/?t=$now")
+            .header("Cache-Control", "no-cache")
+            .build()
+        val resp = liveHttpClient.newCall(req).execute()
+        if (resp.isSuccessful) {
+            val body = resp.body?.string() ?: ""
+            val listType = Types.newParameterizedType(List::class.java, ManishWorkerChannelItem::class.java)
+            val adapter = moshi.adapter<List<ManishWorkerChannelItem>>(listType)
+            val list = adapter.fromJson(body) ?: emptyList()
+            val byId = mutableMapOf<String, ManishWorkerChannelItem>()
+            val byName = mutableMapOf<String, ManishWorkerChannelItem>()
+            for (item in list) {
+                val itemId = item.id?.trim()
+                if (!itemId.isNullOrBlank()) {
+                    byId[itemId] = item
+                }
+                val itemName = item.name?.trim()
+                if (!itemName.isNullOrBlank()) {
+                    val norm = itemName.lowercase().replace(Regex("[^a-z0-9]"), "")
+                    byName[norm] = item
+                }
+            }
+            cachedManishChannels = list
+            cachedManishById = byId
+            cachedManishByName = byName
+            manishCacheFetchTime = now
+            return Triple(list, byId, byName)
+        }
+    } catch (_: Exception) {}
+
+    return Triple(cachedManishChannels ?: emptyList(), cachedManishById ?: emptyMap(), cachedManishByName ?: emptyMap())
+}
+
 @OptIn(UnstableApi::class)
 @Composable
 fun LiveTvScreen(viewModel: com.example.ui.viewmodel.MovieViewModel? = null) {
@@ -320,9 +369,47 @@ fun LiveTvScreen(viewModel: com.example.ui.viewmodel.MovieViewModel? = null) {
                         }
                     }
 
+                    val manishDeferred = async {
+                        try {
+                            val (manishList, _, _) = fetchManishWorkerChannels()
+                            manishList.mapNotNull { item ->
+                                val name = item.name?.trim() ?: return@mapNotNull null
+                                val id = item.id?.trim()?.ifBlank { null }
+                                    ?: "mw-${name.lowercase().replace(Regex("[^a-z0-9]"), "-")}"
+                                val url = item.url?.trim() ?: ""
+                                if (url.isBlank()) return@mapNotNull null
+                                val rawCategory = item.category?.trim()?.ifBlank { null }
+                                    ?: item.cat?.trim()?.ifBlank { null }
+                                    ?: "General"
+                                val cleanCategory = when {
+                                    rawCategory.contains("sports", ignoreCase = true) -> "Sports"
+                                    rawCategory.contains("sunnxt", ignoreCase = true) -> "Entertainment"
+                                    rawCategory.contains("streamx", ignoreCase = true) -> "Entertainment"
+                                    rawCategory.equals("none", ignoreCase = true) || rawCategory.equals("unknown", ignoreCase = true) -> "General"
+                                    else -> rawCategory
+                                }
+                                UnifiedChannel(
+                                    id = id,
+                                    name = name,
+                                    logo = item.logo?.trim(),
+                                    category = cleanCategory,
+                                    streamUrl = url,
+                                    isJioTv = true,
+                                    directKeyId = item.keyId?.trim(),
+                                    directKey = item.key?.trim(),
+                                    directCookie = item.cookie?.trim(),
+                                    isDirectWorker = true
+                                )
+                            }
+                        } catch (_: Exception) {
+                            emptyList()
+                        }
+                    }
+
                     val (jioChannels, jioList) = jioDeferred.await()
                     val fancodeChannels = fancodeDeferred.await()
                     val rawSony = sonyDeferred.await()
+                    val manishChannels = manishDeferred.await()
 
                     val mappedSonyChannels = rawSony.map { ch ->
                         val mappedLogo = resolveSonyLogoFromJio(ch.name, jioList)
@@ -335,7 +422,44 @@ fun LiveTvScreen(viewModel: com.example.ui.viewmodel.MovieViewModel? = null) {
                         )
                     }
 
-                    (jioChannels + fancodeChannels + mappedSonyChannels).distinctBy { it.id to it.name }
+                    val seenNormNames = mutableSetOf<String>()
+                    val mergedChannels = mutableListOf<UnifiedChannel>()
+
+                    // 1. Primary Lovable Jio channels
+                    for (ch in jioChannels) {
+                        val norm = ch.name.lowercase().replace(Regex("[^a-z0-9]"), "")
+                        if (norm.isNotBlank() && seenNormNames.add(norm)) {
+                            mergedChannels.add(ch)
+                        }
+                    }
+
+                    // 2. Manish worker channels (adds Sun TV network, ETV network, TNT Sports, and unique channels)
+                    for (ch in manishChannels) {
+                        val norm = ch.name.lowercase().replace(Regex("[^a-z0-9]"), "")
+                        if (norm.isNotBlank() && seenNormNames.add(norm)) {
+                            mergedChannels.add(ch)
+                        }
+                    }
+
+                    // 3. Sony LIV channels
+                    for (ch in mappedSonyChannels) {
+                        val norm = ch.name.lowercase().replace(Regex("[^a-z0-9]"), "")
+                        if (norm.isNotBlank() && seenNormNames.add(norm)) {
+                            mergedChannels.add(ch)
+                        }
+                    }
+
+                    // 4. FanCode channels
+                    for (ch in fancodeChannels) {
+                        val norm = ch.name.lowercase().replace(Regex("[^a-z0-9]"), "")
+                        if (norm.isNotBlank() && seenNormNames.add(norm)) {
+                            mergedChannels.add(ch)
+                        } else if (norm.isBlank()) {
+                            mergedChannels.add(ch)
+                        }
+                    }
+
+                    mergedChannels
                 } else {
                     // M3U stream catalog from iptv-org
                     val countryParam = selectedCountryCode.lowercase()
@@ -1264,8 +1388,78 @@ fun UnifiedLiveTvPlayerDialog(
                     var primaryApiSucceeded = false
                     var primaryApiError: Exception? = null
 
-                    // If attemptCount is 1, try primary Lovable API with 1 retry (total 2 attempts)
-                    if (attemptCount < 2) {
+                    // Branch A: Direct Worker channel (e.g. Sun TV network, ETV, TNT Sports from Manish Worker)
+                    if (channel.isDirectWorker && channel.streamUrl.isNotBlank() && attemptCount < 2) {
+                        url = channel.streamUrl
+
+                        // Parse DRM ClearKey(s)
+                        val dKeyId = channel.directKeyId
+                        val dKey = channel.directKey
+                        if (!dKeyId.isNullOrBlank() && dKeyId.contains(":")) {
+                            dKeyId.split(",").forEach { pair ->
+                                val parts = pair.split(":")
+                                if (parts.size == 2 && parts[0].isNotBlank() && parts[1].isNotBlank()) {
+                                    keysMap[parts[0].trim()] = parts[1].trim()
+                                }
+                            }
+                        } else if (!dKeyId.isNullOrBlank() && !dKey.isNullOrBlank()) {
+                            keysMap[dKeyId] = dKey
+                        }
+
+                        // Fallback to ClearKey database lookup if empty
+                        if (keysMap.isEmpty()) {
+                            val match = fallbackKeysCache?.find { it.id == channel.id }
+                            if (match != null) {
+                                if (!match.keyId.isNullOrBlank() && !match.key.isNullOrBlank()) {
+                                    keysMap[match.keyId] = match.key
+                                }
+                                match.keys?.forEach { pair ->
+                                    if (!pair.keyId.isNullOrBlank() && !pair.key.isNullOrBlank()) {
+                                        keysMap[pair.keyId] = pair.key
+                                    }
+                                }
+                            }
+                        }
+
+                        // Extract token or borrow active token for Jio CDN streams
+                        var token = if (url.contains("__hdnea__")) {
+                            url.substringAfter("__hdnea__=").substringBefore("&")
+                        } else if (!channel.directCookie.isNullOrBlank() && channel.directCookie.contains("__hdnea__=") && !channel.directCookie.contains("error code")) {
+                            channel.directCookie.substringAfter("__hdnea__=").substringBefore(";").trim()
+                        } else ""
+
+                        if (token.isBlank() && (url.contains("jio.com") || url.contains("bpk-tv"))) {
+                            val (zioById, _) = fetchZioChannels()
+                            val liveZioToken = zioById.values.firstNotNullOfOrNull { it.token?.takeIf { t -> t.isNotBlank() } }
+                            if (!liveZioToken.isNullOrBlank()) {
+                                token = liveZioToken
+                            } else {
+                                try {
+                                    val cReq = Request.Builder().url("https://allinonereborn2.online/jstrweb2/cookies.json").build()
+                                    val cResp = liveHttpClient.newCall(cReq).execute()
+                                    val cBody = cResp.body?.string() ?: ""
+                                    val listType = Types.newParameterizedType(List::class.java, Map::class.java)
+                                    val mapAdapter = moshi.adapter<List<Map<String, Any>>>(listType)
+                                    val cookieList = mapAdapter.fromJson(cBody)
+                                    val fullCookie = cookieList?.firstNotNullOfOrNull { it["cookie"] as? String }
+                                    if (!fullCookie.isNullOrBlank()) {
+                                        token = fullCookie.substringAfter("__hdnea__=").trim()
+                                    }
+                                } catch (_: Exception) {}
+                            }
+                        }
+
+                        if (token.isNotBlank() && !url.contains("__hdnea__")) {
+                            val sep = if (url.contains("?")) "&" else "?"
+                            url = "$url${sep}__hdnea__=$token"
+                        }
+
+                        primaryApiSucceeded = true
+                    }
+
+                    // Branch B: Standard Jio channel
+                    // 1st PRIORITY: Lovable API (if attemptCount == 1 and not already resolved)
+                    if (!primaryApiSucceeded && attemptCount < 2) {
                         for (apiAttempt in 1..2) {
                             try {
                                 val req = Request.Builder()
@@ -1354,7 +1548,55 @@ fun UnifiedLiveTvPlayerDialog(
                         }
                     }
 
-                    // Fallback: If Lovable API failed after 1 retry, or if attemptCount >= 2 (playback error on Lovable stream)
+                    // 2nd PRIORITY (Fallback): Manish Worker API
+                    if (!primaryApiSucceeded || url == null) {
+                        try {
+                            val (_, mById, mByName) = fetchManishWorkerChannels()
+                            val normName = channel.name.lowercase().replace(Regex("[^a-z0-9]"), "")
+                            val matchedManish = mById[channel.id] ?: mByName[normName]
+
+                            if (matchedManish != null && !matchedManish.url.isNullOrBlank()) {
+                                var mUrl = matchedManish.url.trim()
+                                val mKeyId = matchedManish.keyId?.trim()
+                                val mKey = matchedManish.key?.trim()
+
+                                if (!mKeyId.isNullOrBlank() && mKeyId.contains(":")) {
+                                    mKeyId.split(",").forEach { pair ->
+                                        val parts = pair.split(":")
+                                        if (parts.size == 2 && parts[0].isNotBlank() && parts[1].isNotBlank()) {
+                                            keysMap[parts[0].trim()] = parts[1].trim()
+                                        }
+                                    }
+                                } else if (!mKeyId.isNullOrBlank() && !mKey.isNullOrBlank()) {
+                                    keysMap[mKeyId] = mKey
+                                }
+
+                                var token = if (mUrl.contains("__hdnea__")) {
+                                    mUrl.substringAfter("__hdnea__=").substringBefore("&")
+                                } else if (!matchedManish.cookie.isNullOrBlank() && matchedManish.cookie.contains("__hdnea__=") && !matchedManish.cookie.contains("error code")) {
+                                    matchedManish.cookie.substringAfter("__hdnea__=").substringBefore(";").trim()
+                                } else ""
+
+                                if (token.isBlank() && (mUrl.contains("jio.com") || mUrl.contains("bpk-tv"))) {
+                                    val (zioById, _) = fetchZioChannels()
+                                    val liveZioToken = zioById.values.firstNotNullOfOrNull { it.token?.takeIf { t -> t.isNotBlank() } }
+                                    if (!liveZioToken.isNullOrBlank()) {
+                                        token = liveZioToken
+                                    }
+                                }
+
+                                if (token.isNotBlank() && !mUrl.contains("__hdnea__")) {
+                                    val sep = if (mUrl.contains("?")) "&" else "?"
+                                    mUrl = "$mUrl${sep}__hdnea__=$token"
+                                }
+
+                                url = mUrl
+                                primaryApiSucceeded = true
+                            }
+                        } catch (_: Exception) {}
+                    }
+
+                    // 3rd PRIORITY (Final Fallback): zio.m3u
                     if (!primaryApiSucceeded || url == null) {
                         val (zioById, zioByName) = fetchZioChannels()
                         val normName = channel.name.lowercase().replace(Regex("[^a-z0-9]"), "")
@@ -1371,7 +1613,7 @@ fun UnifiedLiveTvPlayerDialog(
                             keysMap.clear()
                             keysMap.putAll(matchedZio.keysMap)
                         } else {
-                            throw primaryApiError ?: Exception("Failed to resolve channel from primary API and backup zio.m3u")
+                            throw primaryApiError ?: Exception("Failed to resolve channel from primary API, backup worker, and zio.m3u")
                         }
                     }
 

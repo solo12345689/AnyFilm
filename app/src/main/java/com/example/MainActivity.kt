@@ -24,7 +24,7 @@ class MainActivity : AppCompatActivity() {
         }
         
         // Start local MovieBox proxy server automatically inside the phone when opened
-        localServer = LocalMovieBoxServer(applicationContext, 3000)
+        localServer = LocalMovieBoxServer.getInstance(applicationContext, 3000)
         localServer?.start()
 
         val imageDispatcher = okhttp3.Dispatcher().apply {
@@ -76,7 +76,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        localServer?.stop()
+        if (!com.example.cast.CastForegroundService.isCasting) {
+            localServer?.stop()
+        }
     }
 
     override fun onUserLeaveHint() {

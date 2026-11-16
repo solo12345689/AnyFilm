@@ -473,8 +473,54 @@ fun AllCatalogScreen(
 ) {
     BackHandler(onBack = onBack)
 
-    val displayList = remember(section) {
-        section?.items?.distinctBy { it.id } ?: emptyList()
+    var catalogItems by remember(section) { mutableStateOf<List<com.example.data.model.MovieSubject>>(emptyList()) }
+    var isLoadingCatalog by remember(section) { mutableStateOf(false) }
+    var currentPage by remember(section) { mutableStateOf(1) }
+    var canLoadMore by remember(section) { mutableStateOf(true) }
+
+    val isAniFamBrowse = remember(section, viewModel.isAniFam) {
+        viewModel.isAniFam && section?.deepLink?.startsWith("anifam://browse") == true
+    }
+
+    val isMovieBoxRanking = remember(section, viewModel.isAniFam) {
+        section != null && !viewModel.isAniFam && (
+            section.deepLink.contains("/rank/all", ignoreCase = true) ||
+            section.deepLink.contains("rank_all", ignoreCase = true) ||
+            section.type.equals("RANKING", ignoreCase = true) ||
+            section.type.equals("RANKING_LIST_MULTI_TAB", ignoreCase = true)
+        )
+    }
+
+    LaunchedEffect(section) {
+        currentPage = 1
+        canLoadMore = true
+        if (isAniFamBrowse && section != null) {
+            isLoadingCatalog = true
+            try {
+                val fullList = viewModel.getAniFamBrowseForSection(section, page = 1)
+                if (fullList.isNotEmpty()) {
+                    catalogItems = fullList
+                }
+            } catch (_: Exception) {}
+            isLoadingCatalog = false
+        } else if (isMovieBoxRanking && section != null) {
+            isLoadingCatalog = true
+            try {
+                val fullList = viewModel.getRankingListForSection(section)
+                if (fullList.isNotEmpty()) {
+                    catalogItems = fullList
+                }
+            } catch (_: Exception) {}
+            isLoadingCatalog = false
+        }
+    }
+
+    val displayList = remember(section, catalogItems) {
+        if (catalogItems.isNotEmpty()) {
+            catalogItems.distinctBy { it.id }
+        } else {
+            section?.items?.distinctBy { it.id } ?: emptyList()
+        }
     }
 
     val screenTitle = section?.title?.ifBlank { "All Content" } ?: "All Content"
@@ -507,6 +553,14 @@ fun AllCatalogScreen(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+            if (isLoadingCatalog) {
+                Spacer(modifier = Modifier.width(10.dp))
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    color = CinematicRed,
+                    strokeWidth = 2.dp
+                )
+            }
         }
 
         // 3-Column Content Grid for the selected section
@@ -517,7 +571,11 @@ fun AllCatalogScreen(
                     .padding(top = 100.dp),
                 contentAlignment = Alignment.TopCenter
             ) {
-                Text("No movies found", color = TextSecondary, fontSize = 14.sp)
+                if (isLoadingCatalog) {
+                    CircularProgressIndicator(color = CinematicRed)
+                } else {
+                    Text("No movies found", color = TextSecondary, fontSize = 14.sp)
+                }
             }
         } else {
             LazyVerticalGrid(
@@ -530,7 +588,25 @@ fun AllCatalogScreen(
                 itemsIndexed(
                     items = displayList,
                     key = { index, movie -> "${movie.id}_$index" }
-                ) { _, movie ->
+                ) { index, movie ->
+                    if (isAniFamBrowse && canLoadMore && !isLoadingCatalog && index >= displayList.size - 4) {
+                        LaunchedEffect(displayList.size) {
+                            isLoadingCatalog = true
+                            try {
+                                val nextPage = currentPage + 1
+                                val moreItems = viewModel.getAniFamBrowseForSection(section!!, page = nextPage)
+                                if (moreItems.isNotEmpty()) {
+                                    currentPage = nextPage
+                                    catalogItems = (catalogItems.ifEmpty { section.items } + moreItems).distinctBy { it.id }
+                                } else {
+                                    canLoadMore = false
+                                }
+                            } catch (_: Exception) {
+                                canLoadMore = false
+                            }
+                            isLoadingCatalog = false
+                        }
+                    }
                     MovieGridItem(movie = movie, modifier = Modifier.fillMaxWidth()) {
                         viewModel.selectSubject(movie)
                     }

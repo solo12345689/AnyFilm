@@ -97,6 +97,23 @@ class PreferencesManager(context: Context) {
         get() = prefs.getString("default_download_quality", "Highest") ?: "Highest"
         set(value) = prefs.edit().putString("default_download_quality", value).apply()
 
+    fun getDeletedAniFamAnimeIds(): MutableSet<String> {
+        return prefs.getStringSet("anifam_deleted_history_anime_ids", emptySet())?.toMutableSet() ?: mutableSetOf()
+    }
+
+    fun addDeletedAniFamAnimeId(animeId: String) {
+        val current = getDeletedAniFamAnimeIds()
+        current.add(animeId)
+        prefs.edit().putStringSet("anifam_deleted_history_anime_ids", current).apply()
+    }
+
+    fun removeDeletedAniFamAnimeId(animeId: String) {
+        val current = getDeletedAniFamAnimeIds()
+        if (current.remove(animeId)) {
+            prefs.edit().putStringSet("anifam_deleted_history_anime_ids", current).apply()
+        }
+    }
+
     fun clearDeveloperBypass() {
         prefs.edit()
             .remove(KEY_SP_CODE)
@@ -108,12 +125,19 @@ class PreferencesManager(context: Context) {
     }
 
     fun applyDeveloperBypass() {
-        prefs.edit()
-            .putString(KEY_SP_CODE, "40401")
-            .putString(KEY_LOCAL_ISO, "in")
-            .putString(KEY_LOCAL_COUNTRY, "India")
-            .putString(KEY_COUNTRY_CODE, "91")
-            .putBoolean(KEY_IS_DEVELOPER, true)
-            .apply()
+        val editor = prefs.edit().putBoolean(KEY_IS_DEVELOPER, true)
+        if (!prefs.contains(KEY_SP_CODE)) {
+            editor.putString(KEY_SP_CODE, "40401")
+        }
+        if (!prefs.contains(KEY_LOCAL_ISO)) {
+            editor.putString(KEY_LOCAL_ISO, "in")
+        }
+        if (!prefs.contains(KEY_LOCAL_COUNTRY)) {
+            editor.putString(KEY_LOCAL_COUNTRY, "India")
+        }
+        if (!prefs.contains(KEY_COUNTRY_CODE)) {
+            editor.putString(KEY_COUNTRY_CODE, "91")
+        }
+        editor.apply()
     }
 }

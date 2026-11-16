@@ -49,8 +49,17 @@ class MovieRepository(
         dao.deleteHistoryById(id)
     }
 
+    suspend fun deleteHistoryBySubject(subjectId: String) = withContext(Dispatchers.IO) {
+        val clean = subjectId.removePrefix("anifam_").removePrefix("moviebox_")
+        dao.deleteHistoryBySubject(subjectId, "anifam_$clean", clean)
+    }
+
     suspend fun getHistoryById(id: String): HistoryEntity? = withContext(Dispatchers.IO) {
         dao.getHistoryById(id)
+    }
+
+    suspend fun getAllHistoryDirect(): List<HistoryEntity> = withContext(Dispatchers.IO) {
+        dao.getAllHistoryDirect()
     }
 
     // AniFam API & Helper
@@ -122,10 +131,23 @@ class MovieRepository(
         }
     }
 
+    val providerCacheKey: String
+        get() {
+            if (isAniFam) return "anifam"
+            val iso = prefs?.localIso?.lowercase()?.ifEmpty { "in" } ?: "in"
+            return "moviebox_$iso"
+        }
+
+    fun clearFeedCache() {
+        memoryCategoryCache.clear()
+        memorySectionsCache.clear()
+        memoryTrendingCache.clear()
+    }
+
     fun getCachedCategorySections(categoryId: Int): List<CategorySection> {
         val mem = memorySectionsCache[categoryId]
         if (!mem.isNullOrEmpty()) return mem
-        val disk = loadSectionsFromDisk("${if (isAniFam) "anifam" else "moviebox"}_$categoryId")
+        val disk = loadSectionsFromDisk("${providerCacheKey}_$categoryId")
         if (!disk.isNullOrEmpty()) {
             memorySectionsCache[categoryId] = disk
             return disk
@@ -136,7 +158,7 @@ class MovieRepository(
     fun getCachedCategoryList(categoryId: Int): List<MovieSubject> {
         val mem = memoryCategoryCache[categoryId]
         if (!mem.isNullOrEmpty()) return mem
-        val disk = loadMoviesFromDisk("${if (isAniFam) "anifam" else "moviebox"}_$categoryId")
+        val disk = loadMoviesFromDisk("${providerCacheKey}_$categoryId")
         if (!disk.isNullOrEmpty()) {
             memoryCategoryCache[categoryId] = disk
             return disk
@@ -146,7 +168,7 @@ class MovieRepository(
 
     fun getCachedTrending(): List<MovieSubject> {
         if (memoryTrendingCache.isNotEmpty()) return memoryTrendingCache.toList()
-        val disk = loadMoviesFromDisk("trending_${if (isAniFam) "anifam" else "moviebox"}")
+        val disk = loadMoviesFromDisk("trending_${providerCacheKey}")
         if (!disk.isNullOrEmpty()) {
             memoryTrendingCache.clear()
             memoryTrendingCache.addAll(disk)
@@ -211,7 +233,7 @@ class MovieRepository(
     }
 
     suspend fun getTrending(page: Int = 1, pageSize: Int = 20): List<MovieSubject> = withContext(Dispatchers.IO) {
-        val providerKey = if (isAniFam) "anifam" else "moviebox"
+        val providerKey = providerCacheKey
         val cached = if (page == 1) getCachedTrending() else emptyList()
         if (isAniFam) {
             try {
@@ -236,7 +258,7 @@ class MovieRepository(
                     if (page == 1) {
                         memoryTrendingCache.clear()
                         memoryTrendingCache.addAll(list)
-                        saveMoviesToDisk("trending_moviebox", list)
+                        saveMoviesToDisk("trending_${providerKey}", list)
                     }
                     list
                 } else {
@@ -245,6 +267,35 @@ class MovieRepository(
             } catch (e: Exception) {
                 cached.ifEmpty { memoryTrendingCache.toList() }
             }
+        }
+    }
+
+    suspend fun getRankingList(
+        tabId: Int = 2,
+        categoryType: String = "all",
+        rankingListId: String? = null,
+        page: Int = 1,
+        perPage: Int = 100
+    ): List<MovieSubject> = withContext(Dispatchers.IO) {
+        if (isAniFam) return@withContext emptyList()
+        try {
+            val resp: HomeListResponse = retryWithBackoff {
+                api.getRankingList(
+                    tabId = tabId,
+                    categoryType = categoryType,
+                    rankingListId = rankingListId,
+                    page = page,
+                    perPage = perPage
+                )
+            }
+            val list = resp.data?.list
+            if (!list.isNullOrEmpty()) return@withContext list
+            val items = resp.data?.items
+            if (!items.isNullOrEmpty()) return@withContext items
+            emptyList()
+        } catch (e: Exception) {
+            android.util.Log.e("MovieRepository", "Error fetching ranking list", e)
+            emptyList()
         }
     }
 
@@ -275,7 +326,7 @@ class MovieRepository(
     }
 
     suspend fun getCategorySections(categoryId: Int, page: Int = 1, pageSize: Int = 50): List<CategorySection> = withContext(Dispatchers.IO) {
-        val providerKey = if (isAniFam) "anifam" else "moviebox"
+        val providerKey = providerCacheKey
         val cached = if (page == 1) getCachedCategorySections(categoryId) else (memorySectionsCache[categoryId] ?: emptyList())
         if (isAniFam) {
             try {
@@ -286,22 +337,25 @@ class MovieRepository(
                         sections.add(CategorySection("Spotlight", "SPOTLIGHT", home.spotlight.map { it.toMovieSubject() }))
                     }
                     if (home.trending.isNotEmpty()) {
-                        sections.add(CategorySection("Trending Anime", "TRENDING", home.trending.map { it.toMovieSubject() }))
+                        sections.add(CategorySection("Trending Anime", "TRENDING", home.trending.map { it.toMovieSubject() }, deepLink = "anifam://browse?sort=popular"))
                     }
                     if (home.latest.isNotEmpty()) {
-                        sections.add(CategorySection("Latest Episodes", "LATEST", home.latest.map { it.toMovieSubject() }))
+                        sections.add(CategorySection("Latest Episodes", "LATEST", home.latest.map { it.toMovieSubject() }, deepLink = "anifam://browse"))
                     }
                     if (home.new_releases.isNotEmpty()) {
-                        sections.add(CategorySection("New Releases", "NEW", home.new_releases.map { it.toMovieSubject() }))
+                        sections.add(CategorySection("New Releases", "NEW", home.new_releases.map { it.toMovieSubject() }, deepLink = "anifam://browse?sort=recent"))
                     }
                     if (home.top_airing.isNotEmpty()) {
-                        sections.add(CategorySection("Top Airing", "AIRING", home.top_airing.map { it.toMovieSubject() }))
+                        sections.add(CategorySection("Top Airing", "AIRING", home.top_airing.map { it.toMovieSubject() }, deepLink = "anifam://browse?status=airing&sort=popular"))
                     }
                     if (home.most_popular.isNotEmpty()) {
-                        sections.add(CategorySection("Most Popular", "POPULAR", home.most_popular.map { it.toMovieSubject() }))
+                        sections.add(CategorySection("Most Popular", "POPULAR", home.most_popular.map { it.toMovieSubject() }, deepLink = "anifam://browse?sort=popular"))
+                    }
+                    if (home.completed.isNotEmpty()) {
+                        sections.add(CategorySection("Completed Anime", "COMPLETED", home.completed.map { it.toMovieSubject() }, deepLink = "anifam://browse?status=completed&sort=popular"))
                     }
                     if (home.top_movies.isNotEmpty()) {
-                        sections.add(CategorySection("Top Anime Movies", "MOVIES", home.top_movies.map { it.toMovieSubject() }))
+                        sections.add(CategorySection("Top Anime Movies", "MOVIES", home.top_movies.map { it.toMovieSubject() }, deepLink = "anifam://browse?type=movie&sort=popular"))
                     }
                     if (sections.isNotEmpty()) {
                         memorySectionsCache[categoryId] = sections
@@ -313,7 +367,7 @@ class MovieRepository(
                     val slug = genreItem?.slug
                     val browse = retryWithBackoff { aniFamApi.browse(genre = slug, page = page) }
                     val items = browse.data.map { it.toMovieSubject() }
-                    val sec = listOf(CategorySection(genreItem?.name ?: "Anime", "GENRE", items))
+                    val sec = listOf(CategorySection(genreItem?.name ?: "Anime", "GENRE", items, deepLink = "anifam://browse?genre=${slug ?: ""}"))
                     if (items.isNotEmpty()) {
                         memorySectionsCache[categoryId] = sec
                         if (page == 1) saveSectionsToDisk("${providerKey}_$categoryId", sec)
@@ -343,7 +397,7 @@ class MovieRepository(
     }
 
     suspend fun getCategoryList(categoryId: Int, page: Int = 1, pageSize: Int = 50): List<MovieSubject> = withContext(Dispatchers.IO) {
-        val providerKey = if (isAniFam) "anifam" else "moviebox"
+        val providerKey = providerCacheKey
         val cached = if (page == 1) getCachedCategoryList(categoryId) else (memoryCategoryCache[categoryId] ?: emptyList())
         if (isAniFam) {
             val sections = getCategorySections(categoryId, page, pageSize)
@@ -378,6 +432,29 @@ class MovieRepository(
             } catch (e: Exception) {
                 cached
             }
+        }
+    }
+
+    suspend fun getAniFamBrowse(
+        genre: String? = null,
+        type: String? = null,
+        sort: String? = null,
+        status: String? = null,
+        page: Int = 1
+    ): List<MovieSubject> = withContext(Dispatchers.IO) {
+        try {
+            val resp = retryWithBackoff {
+                aniFamApi.browse(
+                    genre = genre?.ifBlank { null },
+                    type = type?.ifBlank { null },
+                    sort = sort?.ifBlank { null },
+                    status = status?.ifBlank { null },
+                    page = page
+                )
+            }
+            resp.data.map { it.toMovieSubject() }
+        } catch (e: Exception) {
+            emptyList()
         }
     }
 
@@ -475,6 +552,7 @@ class MovieRepository(
                     totalSeasons = 1,
                     duration = detail.duration,
                     dubs = dubOptions,
+                    cast = detail.characters.map { it.toCastMember() },
                     resourceDetectors = resourceDetectors,
                     seasonList = listOf(SeasonInfo(season = 1, episodeList = episodeInfoList))
                 )
@@ -673,6 +751,21 @@ class MovieRepository(
         }
     }
 
+    suspend fun getAniFamEpisodeId(animeId: Int, episodeNumber: Int): Int? = withContext(Dispatchers.IO) {
+        val cached = aniFamEpisodeMap["${animeId}_${episodeNumber}"]
+        if (cached != null) return@withContext cached
+        try {
+            val epResponse = aniFamApi.getEpisodes(animeId)
+            val found = epResponse.data.find { it.episodeNumber == episodeNumber }
+            if (found != null) {
+                aniFamEpisodeMap["${animeId}_${episodeNumber}"] = found.id
+                found.id
+            } else null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     suspend fun getSearchSuggestions(query: String? = null): List<String> = withContext(Dispatchers.IO) {
         if (isAniFam) {
             if (query.isNullOrBlank()) {
@@ -745,5 +838,196 @@ class MovieRepository(
         memoryTrendingCache.clear()
         memoryCategoryCache.clear()
         memorySectionsCache.clear()
+    }
+
+    // ==================== AniFam Continue Watching & Progress ====================
+
+    suspend fun getAniFamContinueWatching(page: Int = 1): List<AniFamContinueWatchingItem> = withContext(Dispatchers.IO) {
+        if (!isAniFam) return@withContext emptyList()
+        try {
+            val res = aniFamApi.getContinueWatching(page)
+            res.data.forEach { item ->
+                val animeId = item.anime?.id
+                val epId = item.episode_id
+                val epNum = item.epNumber
+                if (animeId != null && epId != null) {
+                    aniFamEpisodeMap["${animeId}_${epNum}"] = epId
+                }
+            }
+            res.data
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    suspend fun syncAniFamWatchProgress(
+        episodeId: Int,
+        positionSeconds: Int,
+        durationSeconds: Int,
+        track: String = "sub"
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (!isAniFam) return@withContext false
+        try {
+            val isoNow = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US).apply {
+                timeZone = java.util.TimeZone.getTimeZone("UTC")
+            }.format(java.util.Date())
+            val req = AniFamProgressRequest(
+                items = listOf(
+                    AniFamProgressItem(
+                        episode_id = episodeId,
+                        position = positionSeconds,
+                        duration = durationSeconds,
+                        track = track,
+                        client_ts = isoNow
+                    )
+                )
+            )
+            aniFamApi.syncProgress(req)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    suspend fun syncAniFamWatchProgressBatch(items: List<AniFamProgressItem>): Boolean = withContext(Dispatchers.IO) {
+        if (!isAniFam || items.isEmpty()) return@withContext false
+        try {
+            val req = AniFamProgressRequest(items = items)
+            aniFamApi.syncProgress(req)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    suspend fun deleteAniFamContinueWatching(id: Int): Boolean = withContext(Dispatchers.IO) {
+        if (!isAniFam) return@withContext false
+        try {
+            val res = aniFamApi.deleteContinueWatching(id)
+            res.isSuccessful
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    // ==================== AniFam W2G (Watch Together) ====================
+
+    suspend fun getW2GRooms(tab: String = "on_air", page: Int = 1): List<W2GRoomItem> = withContext(Dispatchers.IO) {
+        if (!isAniFam) return@withContext emptyList()
+        try {
+            val response = aniFamApi.getW2GRooms(tab = tab, page = page)
+            response.data
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    suspend fun getW2GRoomDetail(roomId: String): W2GRoomDetail? = withContext(Dispatchers.IO) {
+        if (!isAniFam) return@withContext null
+        try {
+            aniFamApi.getW2GRoomDetail(roomId.trim())
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    suspend fun joinW2GRoom(roomId: String): W2GRoomDetail? = withContext(Dispatchers.IO) {
+        if (!isAniFam) return@withContext null
+        try {
+            aniFamApi.joinW2GRoom(roomId.trim())
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    suspend fun getMineW2GRoom(): W2GRoomItem? = withContext(Dispatchers.IO) {
+        if (!isAniFam) return@withContext null
+        try {
+            aniFamApi.getMineW2GRoom().room
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    suspend fun createW2GRoom(episodeId: Int, name: String, track: String = "sub"): W2GRoomDetail? = withContext(Dispatchers.IO) {
+        if (!isAniFam) return@withContext null
+        try {
+            val payload = mapOf(
+                "episode_id" to episodeId,
+                "name" to name,
+                "is_private" to false,
+                "track" to track
+            )
+            aniFamApi.createW2GRoom(payload)
+        } catch (e: retrofit2.HttpException) {
+            val code = e.code()
+            val errorBody = e.response()?.errorBody()?.string() ?: ""
+            if (code == 409 || errorBody.contains("active_room_exists")) {
+                val mineRoom = getMineW2GRoom()
+                throw W2GActiveRoomException(
+                    serverMessage = "You already have an active room. End it before creating a new one.",
+                    activeRoom = mineRoom
+                )
+            } else if (code == 401) {
+                throw W2GUnauthorizedException("AUTH_REQUIRED")
+            } else {
+                val msg = try {
+                    val json = org.json.JSONObject(errorBody)
+                    json.optString("message", e.message())
+                } catch (_: Exception) {
+                    e.message()
+                }
+                throw Exception(msg)
+            }
+        }
+    }
+
+    suspend fun startW2GRoom(roomId: String): Boolean = withContext(Dispatchers.IO) {
+        if (!isAniFam) return@withContext false
+        try {
+            aniFamApi.startW2GRoom(roomId.trim())
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    suspend fun syncW2GRoom(roomId: String, action: String, position: Int): Boolean = withContext(Dispatchers.IO) {
+        if (!isAniFam) return@withContext false
+        try {
+            aniFamApi.syncW2GRoom(roomId, mapOf("action" to action, "position" to position))
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    suspend fun sendW2GMessage(roomId: String, messageText: String): W2GMessage? = withContext(Dispatchers.IO) {
+        if (!isAniFam) return@withContext null
+        try {
+            aniFamApi.sendW2GMessage(roomId, mapOf("body" to messageText))
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    suspend fun leaveW2GRoom(roomId: String): Boolean = withContext(Dispatchers.IO) {
+        if (!isAniFam) return@withContext false
+        try {
+            aniFamApi.leaveW2GRoom(roomId)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    suspend fun endW2GRoom(roomId: String): Boolean = withContext(Dispatchers.IO) {
+        if (!isAniFam) return@withContext false
+        try {
+            aniFamApi.endW2GRoom(roomId)
+            true
+        } catch (e: Exception) {
+            false
+        }
     }
 }

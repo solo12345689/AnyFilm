@@ -76,6 +76,7 @@ data class AniFamHomeResponse(
     val new_releases: List<AniFamAnimeItem> = emptyList(),
     val top_airing: List<AniFamAnimeItem> = emptyList(),
     val most_popular: List<AniFamAnimeItem> = emptyList(),
+    val completed: List<AniFamAnimeItem> = emptyList(),
     val top_movies: List<AniFamAnimeItem> = emptyList()
 )
 
@@ -121,6 +122,33 @@ data class AniFamEpisodeItem(
 }
 
 @JsonClass(generateAdapter = true)
+data class AniFamVoiceActor(
+    val name: String? = null,
+    val image: String? = null,
+    val language: String? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class AniFamCharacter(
+    val name: String? = null,
+    val image: String? = null,
+    val role: String? = null,
+    val voice_actor: AniFamVoiceActor? = null
+) {
+    val fullImageUrl: String
+        get() = if (image.isNullOrEmpty() || image.contains("default.jpg")) "" else if (image.startsWith("http")) image else "https://anifam.net$image"
+
+    fun toCastMember(): CastMember {
+        val roleStr = role?.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() } ?: "Character"
+        return CastMember(
+            name = name ?: "Unknown",
+            role = roleStr,
+            avatar = fullImageUrl
+        )
+    }
+}
+
+@JsonClass(generateAdapter = true)
 data class AniFamAnimeDetail(
     val id: Int,
     val slug: String? = null,
@@ -142,6 +170,7 @@ data class AniFamAnimeDetail(
     val recommended: List<AniFamAnimeItem> = emptyList(),
     val related: List<AniFamAnimeItem> = emptyList(),
     val seasons: List<AniFamAnimeItem> = emptyList(),
+    val characters: List<AniFamCharacter> = emptyList(),
     val comments_count: Int = 0
 ) {
     val displayName: String
@@ -173,7 +202,8 @@ data class AniFamAnimeDetail(
             isTvShow = type?.equals("Movie", ignoreCase = true) != true,
             totalSeasons = 1,
             duration = duration,
-            dubs = dubList
+            dubs = dubList,
+            cast = characters.map { it.toCastMember() }
         )
     }
 }
@@ -294,4 +324,166 @@ data class AniFamProfileUpdateRequest(
     val name: String? = null,
     val bio: String? = null
 )
+
+// ==================== Continue Watching & Progress Sync Models ====================
+
+@JsonClass(generateAdapter = true)
+data class AniFamContinueWatchingItem(
+    val anime: AniFamAnimeItem? = null,
+    val episode_id: Int? = null,
+    val episode_number: Double? = null,
+    val position: Int? = 0,
+    val duration: Int? = 0,
+    val updated_at: String? = null
+) {
+    val epNumber: Int
+        get() = episode_number?.toInt() ?: 1
+}
+
+@JsonClass(generateAdapter = true)
+data class AniFamContinueWatchingResponse(
+    val data: List<AniFamContinueWatchingItem> = emptyList(),
+    val meta: AniFamWatchlistMeta? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class AniFamProgressItem(
+    val episode_id: Int,
+    val position: Int,
+    val duration: Int,
+    val track: String = "sub",
+    val client_ts: String
+)
+
+@JsonClass(generateAdapter = true)
+data class AniFamProgressRequest(
+    val items: List<AniFamProgressItem>
+)
+
+// ==================== W2G (Watch Together) Models ====================
+
+@JsonClass(generateAdapter = true)
+data class W2GHost(
+    val id: Int? = null,
+    val name: String? = null,
+    val username: String? = null,
+    val avatar: String? = null,
+    val rank: String? = null
+) {
+    val fullAvatarUrl: String
+        get() = if (avatar.isNullOrEmpty()) ""
+        else if (avatar.startsWith("http")) avatar
+        else "https://anifam.net$avatar"
+}
+
+@JsonClass(generateAdapter = true)
+data class W2GRoomEpisode(
+    val id: Int? = null,
+    val number: Double? = 1.0
+) {
+    val episodeNumber: Int
+        get() = number?.toInt() ?: 1
+}
+
+@JsonClass(generateAdapter = true)
+data class W2GRoomItem(
+    val public_id: String,
+    val name: String? = null,
+    val host: W2GHost? = null,
+    val anime: AniFamAnimeItem? = null,
+    val episode: W2GRoomEpisode? = null,
+    val track: String? = "sub",
+    val status: String? = "live",
+    val members: Int? = 1,
+    val is_private: Boolean? = false,
+    val visibility: String? = "public",
+    val voice: Boolean? = false,
+    val scheduled_at: String? = null,
+    val created_at: String? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class W2GRoomListResponse(
+    val data: List<W2GRoomItem> = emptyList(),
+    val meta: Map<String, Any?>? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class W2GState(
+    val status: String? = "live",
+    val playing: Boolean? = false,
+    val position: Double? = 0.0,
+    val episode_id: Int? = null,
+    val updated_at: String? = null,
+    val server_time: Long? = null
+) {
+    val positionSeconds: Int
+        get() = position?.toInt() ?: 0
+}
+
+@JsonClass(generateAdapter = true)
+data class W2GUser(
+    val id: Int? = null,
+    val public_id: String? = null,
+    val name: String? = null,
+    val avatar: String? = null,
+    val is_staff: Boolean? = false
+) {
+    val fullAvatarUrl: String
+        get() = if (avatar.isNullOrEmpty()) ""
+        else if (avatar.startsWith("http")) avatar
+        else "https://anifam.net$avatar"
+}
+
+@JsonClass(generateAdapter = true)
+data class W2GMessage(
+    val id: Long? = null,
+    val body: String = "",
+    val created_at: String? = null,
+    val user: W2GUser? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class W2GChatConfig(
+    val slow_mode: Int? = 5,
+    val max_length: Int? = 200
+)
+
+@JsonClass(generateAdapter = true)
+data class W2GRoomDetail(
+    val public_id: String,
+    val name: String? = null,
+    val host: W2GHost? = null,
+    val anime: AniFamAnimeItem? = null,
+    val episode: W2GRoomEpisode? = null,
+    val track: String? = "sub",
+    val status: String? = "live",
+    val members: Int? = 1,
+    val is_private: Boolean? = false,
+    val visibility: String? = "public",
+    val voice: Boolean? = false,
+    val scheduled_at: String? = null,
+    val created_at: String? = null,
+    val state: W2GState? = null,
+    val messages: List<W2GMessage> = emptyList(),
+    val chat: W2GChatConfig? = null,
+    val channel: String? = null,
+    val presence_channel: String? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class W2GMineResponse(
+    val room: W2GRoomItem? = null
+)
+
+class W2GActiveRoomException(
+    val serverMessage: String = "You already have an active room.",
+    val activeRoom: W2GRoomItem? = null
+) : Exception(serverMessage)
+
+class W2GUnauthorizedException(
+    val serverMessage: String = "Please log in to use Watch Together"
+) : Exception(serverMessage)
+
+
 

@@ -10,6 +10,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.data.local.FavoriteEntity
 import com.example.data.local.HistoryEntity
 import com.example.data.local.MovieDatabase
+import com.example.data.model.AniFamProgressItem
 import com.example.data.model.CategorySection
 import com.example.data.model.Episode
 import com.example.data.model.MovieSubject
@@ -25,6 +26,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.isActive
 import java.security.MessageDigest
 import android.widget.Toast
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -225,6 +227,249 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var isLoadingAniFamGenres by mutableStateOf(false)
         private set
+
+    // AniFam W2G (Watch Together) State
+    var w2gPublicRooms by mutableStateOf<List<com.example.data.model.W2GRoomItem>>(emptyList())
+        private set
+    var isLoadingW2GRooms by mutableStateOf(false)
+        private set
+    var activeW2GRoom by mutableStateOf<com.example.data.model.W2GRoomDetail?>(null)
+    var isHostingW2G by mutableStateOf(false)
+    var isGuestWatchingOnOwn by mutableStateOf(false)
+    var activeExistingW2GRoom by mutableStateOf<com.example.data.model.W2GRoomItem?>(null)
+    var showActiveRoomDialog by mutableStateOf(false)
+    val w2gMessages = androidx.compose.runtime.mutableStateListOf<com.example.data.model.W2GMessage>()
+    var w2gSlowModeRemaining by mutableStateOf(0)
+    private var w2gPollingJob: kotlinx.coroutines.Job? = null
+    private var w2gSlowModeJob: kotlinx.coroutines.Job? = null
+
+    fun loadPublicW2GRooms() {
+        if (!isAniFam) return
+        isLoadingW2GRooms = true
+        viewModelScope.launch {
+            try {
+                w2gPublicRooms = repository.getW2GRooms("on_air", 1)
+            } finally {
+                isLoadingW2GRooms = false
+            }
+        }
+    }
+
+    fun joinW2GRoomByCode(code: String, onSuccess: () -> Unit = {}, onError: (String) -> Unit = {}) {
+        val cleanCode = code.trim().lowercase()
+        if (cleanCode.length < 5) {
+            onError("Please enter a valid room code")
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val room = repository.joinW2GRoom(cleanCode)
+                if (room != null) {
+                    val currentUserId = currentUserProfile?.userId?.toIntOrNull()
+                    val currentUserName = currentUserProfile?.nickname ?: currentUserProfile?.username
+                    val isHost = (room.host?.id != null && room.host.id == currentUserId) ||
+                                 (room.host?.name != null && currentUserName != null && (room.host.name.equals(currentUserName, ignoreCase = true) || room.host.name.startsWith(currentUserName, ignoreCase = true)))
+                    setupActiveW2GRoom(room, isHost = isHost)
+                    onSuccess()
+                } else {
+                    onError("Failed to join room. It may have ended or code is invalid.")
+                }
+            } catch (e: Exception) {
+                onError(e.message ?: "Could not connect to room")
+            }
+        }
+    }
+
+    fun createW2GRoomForCurrentEpisode(
+        onSuccess: (String) -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        val ep = currentEpisode ?: return
+        val subject = selectedSubject ?: return
+        val numId = subject.id.removePrefix("anifam_").toIntOrNull() ?: return
+        val track = if (selectedResource?.name?.contains("dub", ignoreCase = true) == true) "dub" else "sub"
+        viewModelScope.launch {
+            try {
+                val episodeId = repository.getAniFamEpisodeId(numId, ep.episodeNumber) ?: ep.episodeId.removePrefix("anifam_${numId}_").toIntOrNull()
+                if (episodeId == null) {
+                    onError("Could not determine episode ID")
+                    return@launch
+                }
+                val roomName = "${subject.name} Ep ${ep.episodeNumber}"
+                val room = repository.createW2GRoom(episodeId, roomName, track)
+                if (room != null) {
+                    repository.startW2GRoom(room.public_id)
+                    setupActiveW2GRoom(room, isHost = true)
+                    onSuccess(room.public_id)
+                } else {
+                    onError("Could not create watch party room")
+                }
+            } catch (e: com.example.data.model.W2GActiveRoomException) {
+                val existing = e.activeRoom
+                if (existing != null) {
+                    activeExistingW2GRoom = existing
+                    showActiveRoomDialog = true
+                    onError("ACTIVE_ROOM_EXISTS")
+                } else {
+                    onError(e.serverMessage)
+                }
+            } catch (e: com.example.data.model.W2GUnauthorizedException) {
+                onError("AUTH_REQUIRED")
+            } catch (e: Exception) {
+                onError(e.message ?: "Error creating watch party")
+            }
+        }
+    }
+
+    fun endExistingAndCreateNewW2GRoom(
+        existingRoomId: String,
+        onSuccess: (String) -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            try {
+                repository.endW2GRoom(existingRoomId)
+                createW2GRoomForCurrentEpisode(onSuccess = onSuccess, onError = onError)
+            } catch (e: Exception) {
+                onError(e.message ?: "Failed to end existing room")
+            }
+        }
+    }
+
+    fun rejoinExistingW2GRoom(
+        roomId: String,
+        onSuccess: () -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            try {
+                val detail = repository.getW2GRoomDetail(roomId)
+                if (detail != null) {
+                    setupActiveW2GRoom(detail, isHost = true)
+                    onSuccess()
+                } else {
+                    joinW2GRoomByCode(roomId, onSuccess = onSuccess, onError = onError)
+                }
+            } catch (e: Exception) {
+                onError(e.message ?: "Could not rejoin room")
+            }
+        }
+    }
+
+    private fun setupActiveW2GRoom(room: com.example.data.model.W2GRoomDetail, isHost: Boolean) {
+        val currentUserId = currentUserProfile?.userId?.toIntOrNull()
+        val currentUserName = currentUserProfile?.nickname ?: currentUserProfile?.username
+        val userIsHost = isHost ||
+            (room.host?.id != null && room.host.id == currentUserId) ||
+            (room.host?.name != null && currentUserName != null && (room.host.name.equals(currentUserName, ignoreCase = true) || room.host.name.startsWith(currentUserName, ignoreCase = true)))
+
+        activeW2GRoom = room
+        isHostingW2G = userIsHost
+        isGuestWatchingOnOwn = false
+        w2gMessages.clear()
+        w2gMessages.addAll(room.messages)
+        startW2GPolling(room.public_id)
+
+        // Automatically load and prepare video playback for the room
+        val animeId = room.anime?.id
+        val epNum = room.episode?.episodeNumber ?: 1
+        if (animeId != null) {
+            val movieSubject = room.anime.toMovieSubject()
+            selectedSubject = movieSubject
+            val targetEpisode = Episode(
+                episodeId = "anifam_${animeId}_$epNum",
+                title = "Episode $epNum",
+                episodeNumber = epNum,
+                seasonNumber = 1
+            )
+            currentEpisode = targetEpisode
+            selectEpisode(targetEpisode)
+        }
+    }
+
+    private fun startW2GPolling(roomId: String) {
+        w2gPollingJob?.cancel()
+        w2gPollingJob = viewModelScope.launch {
+            while (isActive && activeW2GRoom != null) {
+                kotlinx.coroutines.delay(2000)
+                try {
+                    val updated = repository.getW2GRoomDetail(roomId)
+                    if (updated != null) {
+                        val currentUserId = currentUserProfile?.userId?.toIntOrNull()
+                        val currentUserName = currentUserProfile?.nickname ?: currentUserProfile?.username
+                        if ((updated.host?.id != null && updated.host.id == currentUserId) ||
+                            (updated.host?.name != null && currentUserName != null && (updated.host.name.equals(currentUserName, ignoreCase = true) || updated.host.name.startsWith(currentUserName, ignoreCase = true)))) {
+                            isHostingW2G = true
+                        }
+                        activeW2GRoom = updated
+                        val existingIds = w2gMessages.mapNotNull { it.id }.toSet()
+                        val newMessages = updated.messages.filter { it.id != null && !existingIds.contains(it.id) }
+                        if (newMessages.isNotEmpty()) {
+                            w2gMessages.addAll(newMessages)
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
+    fun sendW2GMessage(text: String, onError: (String) -> Unit = {}) {
+        val room = activeW2GRoom ?: return
+        val cleanText = text.trim()
+        if (cleanText.isEmpty()) return
+        if (w2gSlowModeRemaining > 0) {
+            onError("Slow mode: please wait ${w2gSlowModeRemaining}s")
+            return
+        }
+        viewModelScope.launch {
+            val sent = repository.sendW2GMessage(room.public_id, cleanText)
+            if (sent != null) {
+                w2gMessages.add(sent)
+                startSlowModeCountdown(room.chat?.slow_mode ?: 5)
+            } else {
+                onError("Failed to send message")
+            }
+        }
+    }
+
+    private fun startSlowModeCountdown(seconds: Int) {
+        w2gSlowModeRemaining = seconds
+        w2gSlowModeJob?.cancel()
+        w2gSlowModeJob = viewModelScope.launch {
+            while (w2gSlowModeRemaining > 0) {
+                kotlinx.coroutines.delay(1000)
+                w2gSlowModeRemaining--
+            }
+        }
+    }
+
+    fun syncW2GPlayback(action: String, position: Int) {
+        val room = activeW2GRoom ?: return
+        if (!isHostingW2G) return
+        viewModelScope.launch {
+            repository.syncW2GRoom(room.public_id, action, position)
+        }
+    }
+
+    fun leaveActiveW2GRoom() {
+        val room = activeW2GRoom ?: return
+        val roomId = room.public_id
+        val wasHost = isHostingW2G
+        activeW2GRoom = null
+        isGuestWatchingOnOwn = false
+        w2gPollingJob?.cancel()
+        w2gSlowModeJob?.cancel()
+        w2gMessages.clear()
+        selectedSubject = null
+        playInfo = null
+        viewModelScope.launch {
+            if (wasHost) {
+                repository.endW2GRoom(roomId)
+            } else {
+                repository.leaveW2GRoom(roomId)
+            }
+        }
+    }
 
     // Dynamic Categories
     private val defaultMovieBoxCategories = listOf(
@@ -538,9 +783,13 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 val files = candidateDirs
                     .filter { it.exists() && it.isDirectory }
-                    .flatMap { it.listFiles()?.toList() ?: emptyList() }
-                    .filter { it.extension.equals("mp4", ignoreCase = true) }
-                    .distinctBy { it.name }
+                    .flatMap { dir ->
+                        dir.walkTopDown()
+                            .maxDepth(4)
+                            .filter { it.isFile && it.extension.equals("mp4", ignoreCase = true) }
+                            .toList()
+                    }
+                    .distinctBy { it.absolutePath }
                     .sortedBy { it.name }
 
                 withContext(Dispatchers.Main) {
@@ -688,6 +937,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                         try {
                             currentUserProfile = com.squareup.moshi.Moshi.Builder().build().adapter(com.example.data.model.UserProfile::class.java).fromJson(info)
                             isLoggedIn = true
+                            syncAniFamHistory()
                         } catch (_: Exception) {
                             isLoggedIn = false
                         }
@@ -753,6 +1003,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                         currentUserProfile = profile
                         isLoggedIn = true
                         authErrorMsg = ""
+                        syncAniFamHistory()
                         loadDashboardContent()
                         onSuccess()
                     } else {
@@ -822,6 +1073,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                         currentUserProfile = profile
                         isLoggedIn = true
                         authErrorMsg = ""
+                        syncAniFamHistory()
                         loadDashboardContent()
                         onSuccess()
                     } else {
@@ -901,6 +1153,13 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                             android.util.Log.w("MovieViewModel", "AniFam updateProfile name failed: ${e.message}")
                         }
                     }
+                    try {
+                        val app = getApplication<Application>()
+                        val localAvatarFile = java.io.File(app.filesDir, "anifam_avatar.jpg")
+                        localAvatarFile.outputStream().use { out ->
+                            out.write(imageBytes)
+                        }
+                    } catch (_: Exception) {}
                     val profile = com.example.data.model.UserProfile(
                         userId = updatedUser.id?.toString() ?: currentUserProfile?.userId ?: "",
                         username = updatedUser.username ?: updatedUser.name ?: nickname,
@@ -1047,7 +1306,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                     // Cache the user's chosen avatar locally so it always loads immediately and offline
                     try {
                         val app = getApplication<Application>()
-                        val localAvatarFile = java.io.File(app.filesDir, "avatar.jpg")
+                        val localAvatarFile = java.io.File(app.filesDir, "moviebox_avatar.jpg")
                         localAvatarFile.outputStream().use { out ->
                             out.write(imageBytes)
                         }
@@ -1170,8 +1429,18 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
     fun applyCustomSandbox(mcc: String, iso: String) {
         prefs.spCode = mcc
         prefs.localIso = iso
-        prefs.localCountry = if (iso.lowercase() == "in") "India" else "United States"
-        prefs.countryCode = if (iso.lowercase() == "in") "91" else "1"
+        val (country, code) = when (iso.lowercase()) {
+            "in" -> "India" to "91"
+            "us" -> "United States" to "1"
+            "fr" -> "France" to "33"
+            "be" -> "Belgium" to "32"
+            "it" -> "Italy" to "39"
+            "br" -> "Brazil" to "55"
+            "ru" -> "Russia" to "7"
+            else -> "United States" to "1"
+        }
+        prefs.localCountry = country
+        prefs.countryCode = code
         customMcc = mcc
         customCountryIso = iso
 
@@ -1181,6 +1450,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
         _trendingMovies.value = emptyList()
         _categoryMovies.value = emptyList()
         _categorySections.value = emptyList()
+        repository.clearFeedCache()
 
         // Invalidate local proxy cache and guest token for the new region
         viewModelScope.launch(Dispatchers.IO) {
@@ -1331,6 +1601,52 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                 android.util.Log.e("MovieViewModel", "Failed to load category list", e)
             }
         }
+    }
+
+    suspend fun getRankingListForSection(section: CategorySection): List<MovieSubject> {
+        val tabId = if (section.deepLink.contains("tabId=")) {
+            section.deepLink.substringAfter("tabId=").substringBefore("&").toIntOrNull() ?: selectedCategoryTab
+        } else {
+            selectedCategoryTab
+        }
+        val rankingId = if (section.deepLink.contains("rankingListId=")) {
+            section.deepLink.substringAfter("rankingListId=").substringBefore("&").ifEmpty { null }
+        } else if (section.rankingListId.isNotBlank() && section.rankingListId != "0") {
+            section.rankingListId
+        } else {
+            null
+        }
+        val catType = if (section.deepLink.contains("category=")) {
+            section.deepLink.substringAfter("category=").substringBefore("&")
+        } else if (section.deepLink.contains("categoryType=")) {
+            section.deepLink.substringAfter("categoryType=").substringBefore("&")
+        } else {
+            "all"
+        }
+        val fullList = repository.getRankingList(
+            tabId = tabId,
+            categoryType = catType.ifEmpty { "all" },
+            rankingListId = rankingId,
+            perPage = 100
+        )
+        return if (fullList.isNotEmpty()) fullList else section.items
+    }
+
+    suspend fun getAniFamBrowseForSection(section: CategorySection, page: Int = 1): List<MovieSubject> {
+        val dl = section.deepLink
+        val uri = try { android.net.Uri.parse(dl) } catch (_: Exception) { null }
+        val genre = uri?.getQueryParameter("genre")
+        val type = uri?.getQueryParameter("type")
+        val sort = uri?.getQueryParameter("sort")
+        val status = uri?.getQueryParameter("status")
+
+        return repository.getAniFamBrowse(
+            genre = genre,
+            type = type,
+            sort = sort,
+            status = status,
+            page = page
+        )
     }
 
     var searchPage by mutableStateOf(1)
@@ -1654,6 +1970,129 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
         return internalDir
     }
 
+    fun getEpisodeStorageDir(context: android.content.Context, safeShowName: String, safeEpisodeName: String): java.io.File {
+        val baseDir = getDownloadStorageDir(context)
+        val showDir = java.io.File(baseDir, safeShowName)
+        if (!showDir.exists()) showDir.mkdirs()
+        val epDir = java.io.File(showDir, safeEpisodeName)
+        if (!epDir.exists()) epDir.mkdirs()
+        return epDir
+    }
+
+    fun downloadShowPosterOnce(safeShowName: String, posterUrl: String, showDir: java.io.File) {
+        if (posterUrl.isBlank()) return
+        val showPoster = java.io.File(showDir, "poster.jpg")
+        val namedPoster = java.io.File(showDir, "$safeShowName.jpg")
+        if (showPoster.exists() && showPoster.length() > 0) return
+        if (!com.example.ui.screens.PosterDownloadTracker.shouldDownload(safeShowName)) return
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val referer = when {
+                    posterUrl.contains("anifam", ignoreCase = true) -> "https://anifam.net/"
+                    posterUrl.contains("tmdb.org", ignoreCase = true) -> "https://www.themoviedb.org/"
+                    else -> "https://moviebox.ph/"
+                }
+                val posterReq = okhttp3.Request.Builder()
+                    .url(posterUrl)
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+                    .header("Referer", referer)
+                    .header("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+                    .build()
+
+                val posterClient = okhttp3.OkHttpClient.Builder()
+                    .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                    .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                    .followRedirects(true)
+                    .build()
+
+                posterClient.newCall(posterReq).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val bytes = resp.body?.bytes()
+                        if (bytes != null && bytes.isNotEmpty()) {
+                            if (!showPoster.exists()) showPoster.writeBytes(bytes)
+                            try { if (!namedPoster.exists()) namedPoster.writeBytes(bytes) } catch (_: Throwable) {}
+                        }
+                    } else {
+                        com.example.ui.screens.PosterDownloadTracker.markFailed(safeShowName)
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("MovieViewModel", "Failed to download poster for show $safeShowName", e)
+                com.example.ui.screens.PosterDownloadTracker.markFailed(safeShowName)
+            }
+        }
+    }
+
+    fun downloadAllSubtitles(
+        targetEpDir: java.io.File,
+        safeTitle: String,
+        subtitles: List<com.example.data.model.SubtitleItem>
+    ) {
+        if (subtitles.isEmpty()) return
+        if (!targetEpDir.exists()) targetEpDir.mkdirs()
+        viewModelScope.launch(Dispatchers.IO) {
+            val client = okhttp3.OkHttpClient.Builder()
+                .connectTimeout(12, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                .followRedirects(true)
+                .build()
+
+            val subArray = org.json.JSONArray()
+            val usedNames = mutableSetOf<String>()
+
+            for ((index, sub) in subtitles.withIndex()) {
+                try {
+                    if (sub.url.isBlank()) continue
+                    val ext = if (sub.url.contains(".vtt", ignoreCase = true) || sub.format.equals("vtt", ignoreCase = true)) "vtt" else "srt"
+                    val rawLang = sub.language.trim().ifBlank { "Track ${index + 1}" }
+                    val safeLang = rawLang.replace(Regex("[/\\\\:*?\"<>|]"), " ").replace(Regex("\\s+"), " ").trim()
+                    var fileName = "$safeLang.$ext"
+                    var counter = 2
+                    while (usedNames.contains(fileName.lowercase())) {
+                        fileName = "$safeLang ($counter).$ext"
+                        counter++
+                    }
+                    usedNames.add(fileName.lowercase())
+                    val subFile = java.io.File(targetEpDir, fileName)
+
+                    if (!subFile.exists() || subFile.length() == 0L) {
+                        val referer = if (sub.url.contains("anifam")) "https://anifam.net/" else "https://moviebox.ph/"
+                        val req = okhttp3.Request.Builder()
+                            .url(sub.url)
+                            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+                            .header("Referer", referer)
+                            .build()
+                        client.newCall(req).execute().use { resp ->
+                            if (resp.isSuccessful) {
+                                val bytes = resp.body?.bytes()
+                                if (bytes != null && bytes.isNotEmpty()) {
+                                    subFile.writeBytes(bytes)
+                                }
+                            }
+                        }
+                    }
+
+                    if (subFile.exists() && subFile.length() > 0) {
+                        val item = org.json.JSONObject()
+                        item.put("language", rawLang)
+                        item.put("fileName", fileName)
+                        subArray.put(item)
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.w("MovieViewModel", "Subtitle download failed for ${sub.language}: ${e.message}")
+                }
+            }
+
+            if (subArray.length() > 0) {
+                try {
+                    val jsonFile = java.io.File(targetEpDir, "subtitles.json")
+                    jsonFile.writeText(subArray.toString())
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
     fun downloadSingleEpisode(
         context: android.content.Context,
         subject: MovieSubject,
@@ -1663,10 +2102,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val resId = selectedResource?.resourceId
-                val downloadResId = when {
-                    selectedResource?.resourceId?.contains("dub", ignoreCase = true) == true -> "dub"
-                    else -> "sub"
-                }
+                val downloadResId = selectedResource?.resourceId?.ifBlank { null } ?: "sub"
                 val playInfoResult = repository.getPlayInfo(
                     subject.id,
                     episode.seasonNumber,
@@ -1686,7 +2122,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
 
                 val safeTitle = "${subject.name} S${episode.seasonNumber}E${episode.episodeNumber.toString().padStart(2, '0')}"
                 val cookies = stream?.cookie ?: ""
-                startDownload(context, subject, safeTitle, streamUrl, cookies)
+                startDownload(context, subject, safeTitle, streamUrl, cookies, playInfoResult.subTitleList)
             } catch (e: Exception) {
                 safeToast(context, "Download failed: ${e.message}")
             }
@@ -1698,13 +2134,30 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
         subject: MovieSubject,
         safeTitle: String,
         streamUrl: String,
-        cookies: String = ""
+        cookies: String = "",
+        subtitles: List<com.example.data.model.SubtitleItem> = emptyList()
     ) {
         val cleanTitle = safeTitle.replace(Regex("[^a-zA-Z0-9.-]"), "_")
-        if (streamUrl.contains(".m3u8") || isAniFam) {
-            startHlsDownload(context, subject, cleanTitle, streamUrl, cookies)
+        val isAniFamStream = isAniFam ||
+                streamUrl.contains("zokoanime", ignoreCase = true) ||
+                streamUrl.contains("dramahot", ignoreCase = true) ||
+                streamUrl.contains("anifam", ignoreCase = true) ||
+                streamUrl.contains("shiora", ignoreCase = true) ||
+                streamUrl.contains("embermeadow", ignoreCase = true) ||
+                streamUrl.contains("megaplay", ignoreCase = true) ||
+                streamUrl.contains("laggedduringcutscene", ignoreCase = true) ||
+                streamUrl.contains("anipixcdn", ignoreCase = true)
+
+        if (streamUrl.contains(".m3u8", ignoreCase = true) || isAniFamStream) {
+            startHlsDownload(context, subject, cleanTitle, streamUrl, cookies, subtitles)
         } else {
-            com.example.ui.screens.downloadVideo(context, streamUrl, cleanTitle, subject.poster, showToast = false)
+            val safeShowName = subject.name.trim().replace(Regex("[^a-zA-Z0-9.-]"), "_")
+            val epDir = getEpisodeStorageDir(context, safeShowName, cleanTitle)
+            downloadAllSubtitles(epDir, cleanTitle, subtitles)
+            com.example.ui.screens.downloadVideo(
+                context, streamUrl, cleanTitle, subject.poster, showToast = false,
+                safeShowPrefixOverride = safeShowName, subtitles = subtitles
+            )
         }
     }
 
@@ -1713,72 +2166,111 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
         subject: MovieSubject,
         safeTitle: String,
         m3u8Url: String,
-        cookies: String = ""
+        cookies: String = "",
+        subtitles: List<com.example.data.model.SubtitleItem> = emptyList()
     ) {
         val downloadId = System.currentTimeMillis()
-        val dir = getDownloadStorageDir(context)
+        val safeShowName = subject.name.trim().replace(Regex("[^a-zA-Z0-9.-]"), "_")
+        val cleanTitle = safeTitle.replace(Regex("[^a-zA-Z0-9.-]"), "_")
 
-        val targetFile = java.io.File(dir, "$safeTitle.mp4")
-        val partFile = java.io.File(dir, "$safeTitle.mp4.part")
+        val baseAnyFilmDir = getDownloadStorageDir(context)
+        val showDir = java.io.File(baseAnyFilmDir, safeShowName)
+        if (!showDir.exists()) showDir.mkdirs()
 
-        if (subject.poster.isNotEmpty()) {
-            viewModelScope.launch(Dispatchers.IO) {
-                try {
-                    val safeShowName = Regex("(.*?)(_S\\d+E\\d+.*|$)").find(safeTitle)?.groupValues?.get(1)?.trim() ?: safeTitle
-                    val safeShowPrefix = safeShowName.replace(Regex("[^a-zA-Z0-9.-]"), "_")
+        val epDir = java.io.File(showDir, cleanTitle)
+        if (!epDir.exists()) epDir.mkdirs()
 
-                    val titlePoster = java.io.File(dir, "$safeTitle.jpg")
-                    val showPoster = if (safeShowPrefix.isNotEmpty() && safeShowPrefix != safeTitle) java.io.File(dir, "$safeShowPrefix.jpg") else null
+        val targetFile = java.io.File(epDir, "$cleanTitle.mp4")
+        val partFile = java.io.File(epDir, "$cleanTitle.mp4.part")
 
-                    val pubDir = java.io.File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES), "AnyFilm")
-                    val pubTitlePoster = if (pubDir != dir && pubDir.exists()) java.io.File(pubDir, "$safeTitle.jpg") else null
-                    val pubShowPoster = if (pubDir != dir && pubDir.exists() && safeShowPrefix.isNotEmpty() && safeShowPrefix != safeTitle) java.io.File(pubDir, "$safeShowPrefix.jpg") else null
+        // 1. Download Show Poster ONCE into showDir/poster.jpg (never duplicate per episode)
+        downloadShowPosterOnce(safeShowName, subject.poster, showDir)
 
-                    val posterReq = okhttp3.Request.Builder()
-                        .url(subject.poster)
-                        .header("User-Agent", "okhttp/4.12.0")
-                        .header("accept", "image/webp,image/apng,image/*,*/*;q=0.8")
-                        .build()
-
-                    val posterClient = okhttp3.OkHttpClient.Builder()
-                        .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
-                        .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
-                        .followRedirects(true)
-                        .build()
-
-                    posterClient.newCall(posterReq).execute().use { resp ->
-                        if (resp.isSuccessful) {
-                            val bytes = resp.body?.bytes()
-                            if (bytes != null && bytes.isNotEmpty()) {
-                                if (!titlePoster.exists()) titlePoster.writeBytes(bytes)
-                                if (showPoster != null && !showPoster.exists()) showPoster.writeBytes(bytes)
-                                if (pubTitlePoster != null && !pubTitlePoster.exists()) {
-                                    try { pubTitlePoster.writeBytes(bytes) } catch (_: Throwable) {}
-                                }
-                                if (pubShowPoster != null && !pubShowPoster.exists()) {
-                                    try { pubShowPoster.writeBytes(bytes) } catch (_: Throwable) {}
-                                }
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    android.util.Log.e("MovieViewModel", "Failed to download poster for $safeTitle", e)
-                }
-            }
-        }
+        // 2. Download all subtitles for this episode into epDir
+        downloadAllSubtitles(epDir, cleanTitle, subtitles)
 
         val job = viewModelScope.launch(Dispatchers.IO) {
             val currentJob = coroutineContext[kotlinx.coroutines.Job]
             val client = okhttp3.OkHttpClient.Builder()
                 .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
-                .readTimeout(25, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                .followRedirects(true)
+                .followSslRedirects(true)
                 .build()
 
+            val isAniFamStream = isAniFam ||
+                    m3u8Url.contains("zokoanime", ignoreCase = true) ||
+                    m3u8Url.contains("dramahot", ignoreCase = true) ||
+                    m3u8Url.contains("anifam", ignoreCase = true) ||
+                    m3u8Url.contains("shiora", ignoreCase = true) ||
+                    m3u8Url.contains("embermeadow", ignoreCase = true) ||
+                    m3u8Url.contains("megaplay", ignoreCase = true) ||
+                    m3u8Url.contains("laggedduringcutscene", ignoreCase = true) ||
+                    m3u8Url.contains("anipixcdn", ignoreCase = true)
+
+            var defaultUserAgent = if (isAniFamStream) "okhttp/4.12.0" else "MovieBoxPro/16.2.1 (Android 14; com.community.mbox.in)"
+            var defaultReferer: String? = null
+            var defaultOrigin: String? = null
+
+            if (isAniFamStream) {
+                when {
+                    m3u8Url.contains("shiora", ignoreCase = true) ||
+                    m3u8Url.contains("embermeadow", ignoreCase = true) ||
+                    m3u8Url.contains("megaplay", ignoreCase = true) ||
+                    m3u8Url.contains("laggedduringcutscene", ignoreCase = true) -> {
+                        defaultReferer = "https://megaplay.buzz/"
+                        defaultOrigin = "https://megaplay.buzz"
+                        defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+                    }
+                    m3u8Url.contains("anipixcdn", ignoreCase = true) -> {
+                        defaultUserAgent = "okhttp/4.12.0"
+                    }
+                    else -> {
+                        defaultReferer = "https://zokoanime.video/"
+                        defaultOrigin = "https://zokoanime.video"
+                        defaultUserAgent = "okhttp/4.12.0"
+                    }
+                }
+            }
+
+            val actualCookies = mutableListOf<String>()
+            var customUserAgent: String? = null
+            var customReferer: String? = null
+            var customOrigin: String? = null
+
+            if (cookies.isNotBlank()) {
+                cookies.split(";").forEach { rawPair ->
+                    val pair = rawPair.trim()
+                    if (pair.contains("=")) {
+                        val parts = pair.split("=", limit = 2)
+                        val k = parts[0].trim()
+                        val v = parts[1].trim()
+                        when {
+                            k.equals("User-Agent", ignoreCase = true) -> customUserAgent = v
+                            k.equals("Referer", ignoreCase = true) -> customReferer = v
+                            k.equals("Origin", ignoreCase = true) -> customOrigin = v
+                            else -> actualCookies.add("$k=$v")
+                        }
+                    } else if (pair.isNotEmpty()) {
+                        actualCookies.add(pair)
+                    }
+                }
+            }
+
+            val finalUserAgent = customUserAgent ?: defaultUserAgent
+            val finalReferer = customReferer ?: defaultReferer
+            val finalOrigin = customOrigin ?: defaultOrigin
+
             val headersBuilder = okhttp3.Headers.Builder()
-                .add("User-Agent", "okhttp/4.12.0")
-                .add("Referer", "https://zokoanime.video/")
-            if (cookies.isNotEmpty()) {
-                headersBuilder.add("Cookie", cookies)
+                .add("User-Agent", finalUserAgent)
+            if (!finalReferer.isNullOrBlank()) {
+                headersBuilder.add("Referer", finalReferer)
+            }
+            if (!finalOrigin.isNullOrBlank()) {
+                headersBuilder.add("Origin", finalOrigin)
+            }
+            if (actualCookies.isNotEmpty()) {
+                headersBuilder.add("Cookie", actualCookies.joinToString("; "))
             }
             val headers = headersBuilder.build()
 
@@ -1800,32 +2292,47 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
 
                 // 1. Fetch playlist
                 val m3u8Req = okhttp3.Request.Builder().url(m3u8Url).headers(headers).build()
-                val m3u8Content = client.newCall(m3u8Req).execute().use { resp ->
+                val (m3u8Content, effectivePlaylistUrl) = client.newCall(m3u8Req).execute().use { resp ->
                     if (!resp.isSuccessful) throw Exception("HTTP ${resp.code} fetching playlist")
-                    resp.body?.string() ?: throw Exception("Empty playlist")
+                    Pair(resp.body?.string() ?: throw Exception("Empty playlist"), resp.request.url.toString())
                 }
 
-                var mediaUrl = m3u8Url
+                var mediaUrl = effectivePlaylistUrl
                 var mediaContent = m3u8Content
                 if (m3u8Content.contains("#EXT-X-STREAM-INF")) {
                     val lines = m3u8Content.lines()
                     val variantUri = lines.firstOrNull { it.trim().isNotEmpty() && !it.startsWith("#") }
                     if (variantUri != null) {
-                        val base = m3u8Url.substringBeforeLast('/') + "/"
-                        mediaUrl = if (variantUri.startsWith("http")) variantUri else java.net.URI(base).resolve(variantUri.trim()).toString()
+                        val trimmed = variantUri.trim()
+                        mediaUrl = try {
+                            java.net.URI(effectivePlaylistUrl).resolve(trimmed).toString()
+                        } catch (_: Exception) {
+                            if (trimmed.startsWith("http")) trimmed else effectivePlaylistUrl.substringBeforeLast('/') + "/" + trimmed
+                        }
                         val mediaReq = okhttp3.Request.Builder().url(mediaUrl).headers(headers).build()
                         mediaContent = client.newCall(mediaReq).execute().use { resp ->
+                            if (!resp.isSuccessful) throw Exception("HTTP ${resp.code} fetching variant playlist")
                             resp.body?.string() ?: throw Exception("Empty media playlist")
                         }
                     }
                 }
 
-                val baseMedia = mediaUrl.substringBeforeLast('/') + "/"
                 val segments = mediaContent.lines()
                     .map { it.trim() }
                     .filter { it.isNotEmpty() && !it.startsWith("#") }
                     .map { uri ->
-                        if (uri.startsWith("http")) uri else java.net.URI(baseMedia).resolve(uri).toString()
+                        val trimmed = uri.trim()
+                        val resolved = try {
+                            java.net.URI(mediaUrl).resolve(trimmed).toString()
+                        } catch (_: Exception) {
+                            if (trimmed.startsWith("http")) trimmed else mediaUrl.substringBeforeLast('/') + "/" + trimmed
+                        }
+                        val baseQuery = mediaUrl.substringAfter('?', "")
+                        if (baseQuery.isNotEmpty() && !trimmed.startsWith("http://") && !trimmed.startsWith("https://") && !resolved.contains("?")) {
+                            "$resolved?$baseQuery"
+                        } else {
+                            resolved
+                        }
                     }
 
                 if (segments.isEmpty()) {
@@ -1851,9 +2358,12 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                                 client.newCall(segReq).execute().use { resp ->
                                     if (resp.isSuccessful) {
                                         segBytes = resp.body?.bytes()
+                                    } else {
+                                        android.util.Log.w("MovieViewModel", "Segment $index failed: HTTP ${resp.code}")
                                     }
                                 }
-                            } catch (_: Exception) {
+                            } catch (e: Exception) {
+                                android.util.Log.w("MovieViewModel", "Segment $index attempt $attempts error: ${e.message}")
                                 kotlinx.coroutines.delay(1000)
                             }
                         }
@@ -1918,11 +2428,16 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
 
         safeToast(context, "Download started...", Toast.LENGTH_SHORT)
         viewModelScope.launch(Dispatchers.IO) {
+            val safeShowName = subject.name.trim().replace(Regex("[^a-zA-Z0-9.-]"), "_")
+            val baseDir = getDownloadStorageDir(context)
+            val showDir = java.io.File(baseDir, safeShowName)
+            if (!showDir.exists()) showDir.mkdirs()
+
+            // Pre-download show poster ONCE upfront for the entire batch
+            downloadShowPosterOnce(safeShowName, subject.poster, showDir)
+
             val resId = selectedResource?.resourceId
-            val downloadResId = when {
-                selectedResource?.resourceId?.contains("dub", ignoreCase = true) == true -> "dub"
-                else -> "sub"
-            }
+            val downloadResId = selectedResource?.resourceId?.ifBlank { null } ?: "sub"
             var queuedCount = 0
             for (ep in episodes) {
                 try {
@@ -1940,7 +2455,7 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                     if (streamUrl.isNotEmpty() && !streamUrl.contains("b164fbfb4347792950bdfbfb563d39d9.mp4")) {
                         val safeTitle = "${subject.name} S${ep.seasonNumber}E${ep.episodeNumber.toString().padStart(2, '0')}"
                         val cookies = stream?.cookie ?: ""
-                        startDownload(context, subject, safeTitle, streamUrl, cookies)
+                        startDownload(context, subject, safeTitle, streamUrl, cookies, playInfoResult.subTitleList)
                         queuedCount++
                         withContext(Dispatchers.Main) {
                             onProgressUpdate?.invoke(queuedCount, episodes.size)
@@ -2122,28 +2637,33 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             } else {
+                val cleanId = subject.id.removePrefix("moviebox_").removePrefix("anifam_")
                 if (isLoggedIn) {
                     val currentList = _cloudFavoritesMovieBox.value
-                    val isFav = currentList.any { it.id == subject.id }
+                    val isFav = currentList.any { it.id == cleanId || it.id == subject.id || it.id == "moviebox_$cleanId" }
                     val nextState = !isFav
                     if (isFav) {
-                        _cloudFavoritesMovieBox.value = currentList.filter { it.id != subject.id }
+                        _cloudFavoritesMovieBox.value = currentList.filter { it.id != cleanId && it.id != subject.id && it.id != "moviebox_$cleanId" }
                     } else {
                         _cloudFavoritesMovieBox.value = listOf(
-                            FavoriteEntity(subject.id, subject.name, subject.poster, subject.isTvShow, subject.rating, subject.year)
+                            FavoriteEntity(cleanId, subject.name, subject.poster, subject.isTvShow, subject.rating, subject.year)
                         ) + currentList
                     }
                     try {
                         val api = MovieBoxRetrofitClient.getApi(prefs)
-                        api.toggleWatchlist(com.example.data.model.WantToSeeRequest(subject.id, if (nextState) 1 else 2, if (subject.isTvShow) 2 else 1))
+                        val action = if (nextState) 1 else 0
+                        val subType = if (subject.isTvShow) 2 else 1
+                        api.toggleWatchlist(com.example.data.model.WantToSeeRequest(cleanId, action, subType))
                     } catch (e: Exception) {}
                 } else {
-                    val isFav = repository.isFavoriteDirect(subject.id)
+                    val isFav = repository.isFavoriteDirect(subject.id) || repository.isFavoriteDirect(cleanId)
                     if (isFav) {
                         repository.deleteFavorite(subject.id)
+                        repository.deleteFavorite(cleanId)
+                        repository.deleteFavorite("moviebox_$cleanId")
                     } else {
                         repository.insertFavorite(
-                            FavoriteEntity(subject.id, subject.name, subject.poster, subject.isTvShow, subject.rating, subject.year)
+                            FavoriteEntity(cleanId, subject.name, subject.poster, subject.isTvShow, subject.rating, subject.year)
                         )
                     }
                 }
@@ -2214,11 +2734,12 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun isFavoriteFlow(id: String): Flow<Boolean> {
-        val rawId = id.removePrefix("anifam_")
+        val rawId = id.removePrefix("anifam_").removePrefix("moviebox_")
         val altId = "anifam_$rawId"
+        val mboxId = "moviebox_$rawId"
         return favoritesList.map { list -> 
             list.any { 
-                it.id == id || it.id == altId || it.id == rawId || it.id.removePrefix("anifam_") == rawId 
+                it.id == id || it.id == altId || it.id == rawId || it.id == mboxId || it.id.removePrefix("anifam_").removePrefix("moviebox_") == rawId 
             } 
         }
     }
@@ -2228,20 +2749,27 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
         playbackProgressMs = positionMs
         mediaDurationMs = durationMs
         
+        // Never save or sync watch history when in a W2G watch party session
+        if (activeW2GRoom != null) return
+
         val subject = selectedSubject ?: return
+        val cleanSubjectId = subject.id.removePrefix("anifam_").removePrefix("moviebox_")
+        if (isAniFam) {
+            prefs.removeDeletedAniFamAnimeId(cleanSubjectId)
+        }
         val prefix = if (isAniFam) "anifam" else "moviebox"
         val id = if (subject.isTvShow) {
             val ep = currentEpisode ?: return
-            "${prefix}_${subject.id}_S${ep.seasonNumber}_E${ep.episodeNumber}"
+            "${prefix}_${cleanSubjectId}_S${ep.seasonNumber}_E${ep.episodeNumber}"
         } else {
-            "${prefix}_${subject.id}"
+            "${prefix}_${cleanSubjectId}"
         }
 
         viewModelScope.launch {
             repository.insertHistory(
                 HistoryEntity(
                     id = id,
-                    subjectId = subject.id,
+                    subjectId = if (isAniFam) "anifam_$cleanSubjectId" else subject.id,
                     name = subject.name,
                     poster = subject.poster,
                     isTvShow = subject.isTvShow,
@@ -2251,12 +2779,180 @@ class MovieViewModel(application: Application) : AndroidViewModel(application) {
                     totalTime = durationMs
                 )
             )
+
+            // Online AniFam progress sync
+            if (isAniFam && isLoggedIn) {
+                val epNum = currentEpisode?.episodeNumber ?: 1
+                val numId = subject.id.removePrefix("anifam_").toIntOrNull()
+                if (numId != null) {
+                    val posSec = (positionMs / 1000).toInt()
+                    val durSec = (durationMs / 1000).toInt()
+                    if (posSec > 0 && durSec > 0 && (posSec % 10 == 0 || posSec == 5)) {
+                        val epId = repository.getAniFamEpisodeId(numId, epNum)
+                            ?: currentEpisode?.episodeId?.removePrefix("anifam_${numId}_")?.toIntOrNull()
+                        if (epId != null) {
+                            val track = if (selectedResource?.name?.contains("dub", ignoreCase = true) == true) "dub" else "sub"
+                            repository.syncAniFamWatchProgress(epId, posSec, durSec, track)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var syncAniFamJob: kotlinx.coroutines.Job? = null
+
+    fun syncAniFamHistory() {
+        if (!isAniFam || !isLoggedIn) return
+        syncAniFamJob?.cancel()
+        syncAniFamJob = viewModelScope.launch {
+            try {
+                val deletedAnimeIds = prefs.getDeletedAniFamAnimeIds()
+
+                // 1. First, upload all locally saved watch history to the AniFam cloud endpoint (excluding deleted anime)
+                val localHistory = repository.getAllHistoryDirect()
+                val aniFamLocal = localHistory.filter { 
+                    (it.id.startsWith("anifam_") || it.subjectId.startsWith("anifam_")) &&
+                    !deletedAnimeIds.contains(it.subjectId.removePrefix("anifam_").removePrefix("moviebox_"))
+                }
+
+                if (aniFamLocal.isNotEmpty()) {
+                    val isoNow = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US).apply {
+                        timeZone = java.util.TimeZone.getTimeZone("UTC")
+                    }.format(java.util.Date())
+
+                    val progressItems = mutableListOf<AniFamProgressItem>()
+                    for (item in aniFamLocal) {
+                        val numId = item.subjectId.removePrefix("anifam_").removePrefix("moviebox_").toIntOrNull()
+                        val posSec = (item.seeTime / 1000).toInt()
+                        val durSec = (item.totalTime / 1000).toInt()
+                        if (numId != null && posSec > 0 && durSec > 0 && !deletedAnimeIds.contains(numId.toString())) {
+                            val epId = repository.getAniFamEpisodeId(numId, item.episode)
+                            if (epId != null) {
+                                progressItems.add(
+                                    AniFamProgressItem(
+                                        episode_id = epId,
+                                        position = posSec,
+                                        duration = durSec,
+                                        track = "sub",
+                                        client_ts = isoNow
+                                    )
+                                )
+                            }
+                        }
+                    }
+
+                    if (progressItems.isNotEmpty()) {
+                        repository.syncAniFamWatchProgressBatch(progressItems)
+                    }
+                }
+
+                // 2. Fetch server continue-watching list and merge latest cloud state into local database
+                val continueItems = repository.getAniFamContinueWatching()
+                for (item in continueItems) {
+                    val anime = item.anime ?: continue
+                    val animeIdStr = anime.id.toString()
+                    if (deletedAnimeIds.contains(animeIdStr)) {
+                        // User previously deleted this anime, ensure server has it removed and do NOT re-insert locally!
+                        repository.deleteAniFamContinueWatching(anime.id)
+                        continue
+                    }
+                    val epNum = item.epNumber
+                    val historyId = "anifam_${anime.id}_S1_E${epNum}"
+                    repository.insertHistory(
+                        HistoryEntity(
+                            id = historyId,
+                            subjectId = "anifam_${anime.id}",
+                            name = anime.title ?: "Anime",
+                            poster = anime.fullPosterUrl,
+                            isTvShow = true,
+                            season = 1,
+                            episode = epNum,
+                            seeTime = (item.position ?: 0) * 1000L,
+                            totalTime = (item.duration ?: 0) * 1000L
+                        )
+                    )
+                }
+            } catch (_: Exception) {}
         }
     }
 
     fun deleteHistoryItem(id: String) {
         viewModelScope.launch {
-            repository.deleteHistory(id)
+            deleteHistoryItemInternal(id)
+        }
+    }
+
+    fun deleteHistoryForSubject(subjectId: String, episodesList: List<HistoryEntity>) {
+        val cleanSubjectId = subjectId.removePrefix("anifam_").removePrefix("moviebox_")
+        if (isAniFam) {
+            prefs.addDeletedAniFamAnimeId(cleanSubjectId)
+        }
+        viewModelScope.launch {
+            // Delete from Room immediately so UI updates instantly
+            repository.deleteHistoryBySubject(cleanSubjectId)
+            repository.deleteHistoryBySubject("anifam_$cleanSubjectId")
+            episodesList.forEach { item ->
+                val cleanItemId = item.id.removePrefix("anifam_").removePrefix("moviebox_")
+                repository.deleteHistory(item.id)
+                repository.deleteHistory("anifam_$cleanItemId")
+                repository.deleteHistory("moviebox_$cleanItemId")
+            }
+
+            // Cloud delete for AniFam
+            if (isAniFam) {
+                val animeId = cleanSubjectId.toIntOrNull()
+                if (animeId != null) {
+                    // Delete anime from AniFam continue-watching (endpoint deletes by anime_id)
+                    repository.deleteAniFamContinueWatching(animeId)
+                }
+                // Also attempt deleting by episode ID for any cached episodes
+                episodesList.forEach { item ->
+                    if (animeId != null) {
+                        val epId = repository.getAniFamEpisodeId(animeId, item.episode)
+                        if (epId != null) {
+                            repository.deleteAniFamContinueWatching(epId)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun deleteHistoryItemInternal(id: String) {
+        val clean = id.removePrefix("anifam_").removePrefix("anifam_").removePrefix("moviebox_")
+        repository.deleteHistory(id)
+        repository.deleteHistory("anifam_$clean")
+        repository.deleteHistory("anifam_anifam_$clean")
+        repository.deleteHistory("moviebox_$clean")
+
+        if (isAniFam) {
+            val animeId = clean.substringBefore("_S").toIntOrNull()
+            val epNum = if (clean.contains("_E")) {
+                clean.substringAfterLast("_E").toIntOrNull() ?: 1
+            } else {
+                1
+            }
+
+            if (animeId != null) {
+                // Check if any other episodes exist for this anime in local DB
+                val remaining = repository.getAllHistoryDirect().filter {
+                    val sId = it.subjectId.removePrefix("anifam_").removePrefix("moviebox_")
+                    val iId = it.id.removePrefix("anifam_").removePrefix("moviebox_")
+                    (sId == animeId.toString() || iId.startsWith("${animeId}_S")) &&
+                    it.id != id && it.id != "anifam_$clean"
+                }
+
+                if (remaining.isEmpty()) {
+                    prefs.addDeletedAniFamAnimeId(animeId.toString())
+                    repository.deleteAniFamContinueWatching(animeId)
+                }
+
+                val epId = repository.getAniFamEpisodeId(animeId, epNum)
+                if (epId != null) {
+                    repository.deleteAniFamContinueWatching(epId)
+                }
+            }
         }
     }
 

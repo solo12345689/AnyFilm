@@ -246,11 +246,11 @@ fun DetailScreen(viewModel: MovieViewModel) {
                         lineHeight = 20.sp
                     )
 
-                    // Live Cast Section
+                    // Live Cast / Characters Section
                     if (subject.cast.isNotEmpty()) {
                         Spacer(modifier = Modifier.height(16.dp))
                         Text(
-                            text = "Cast",
+                            text = if (viewModel.isAniFam) "Characters" else "Cast",
                             fontSize = 18.sp,
                             fontWeight = FontWeight.Bold,
                             color = TextPrimary,
@@ -303,7 +303,7 @@ fun DetailScreen(viewModel: MovieViewModel) {
                                         modifier = Modifier.fillMaxWidth()
                                     )
                                     Text(
-                                        text = actor.role.ifEmpty { "Cast" },
+                                        text = actor.role.ifEmpty { if (viewModel.isAniFam) "Character" else "Cast" },
                                         fontSize = 9.sp,
                                         color = TextSecondary,
                                         maxLines = 1,

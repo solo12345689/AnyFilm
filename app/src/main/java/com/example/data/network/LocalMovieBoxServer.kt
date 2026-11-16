@@ -45,9 +45,16 @@ import javax.crypto.spec.SecretKeySpec
 class LocalMovieBoxServer(private val context: Context, private val port: Int = 3000) {
     companion object {
         @Volatile
-
         private var guestToken: String? = null
 
+        @Volatile
+        private var instance: LocalMovieBoxServer? = null
+
+        fun getInstance(context: Context, port: Int = 3000): LocalMovieBoxServer {
+            return instance ?: synchronized(this) {
+                instance ?: LocalMovieBoxServer(context.applicationContext, port).also { instance = it }
+            }
+        }
     }
 
     private var serverSocket: ServerSocket? = null
@@ -61,12 +68,25 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
     private val mapAdapter = moshi.adapter(Map::class.java)
 
     private val okHttpClient = OkHttpClient.Builder()
-
         .connectionPool(okhttp3.ConnectionPool(10, 5, java.util.concurrent.TimeUnit.MINUTES))
         .connectTimeout(25, java.util.concurrent.TimeUnit.SECONDS)
         .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
+        .build()
 
+    // Dedicated high-throughput OkHttpClient for video casting proxy with NO read/write timeout (continuous playback)
+    private val castOkHttpClient = OkHttpClient.Builder()
+        .connectionPool(okhttp3.ConnectionPool(32, 5, java.util.concurrent.TimeUnit.MINUTES))
+        .dispatcher(okhttp3.Dispatcher().apply {
+            maxRequests = 128
+            maxRequestsPerHost = 32
+        })
+        .connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(0, java.util.concurrent.TimeUnit.MILLISECONDS) // 0 ms = infinite timeout, crucial for long video streams
+        .writeTimeout(0, java.util.concurrent.TimeUnit.MILLISECONDS)
+        .retryOnConnectionFailure(true)
+        .followRedirects(true)
+        .followSslRedirects(true)
         .build()
 
     private val responseCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, String>>()
@@ -279,116 +299,295 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
     }
 
     private fun handleCastProxy(
-
         socket: Socket,
-
         method: String,
-
         query: String,
-
         clientHeaders: Map<String, String>
-
     ) {
-        val qParams = parseQueryParams(query)
+        val output: OutputStream = socket.getOutputStream()
 
-        val targetUrl = qParams["url"] ?: run {
-            sendResponse(socket, 400, "{\"error\": \"Missing url parameter\"}")
-
+        if (method.equals("OPTIONS", ignoreCase = true)) {
+            val corsResponse = "HTTP/1.1 200 OK\r\n" +
+                    "Access-Control-Allow-Origin: *\r\n" +
+                    "Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n" +
+                    "Access-Control-Allow-Headers: Range, Origin, Accept, Content-Type, Authorization\r\n" +
+                    "Access-Control-Max-Age: 86400\r\n" +
+                    "Content-Length: 0\r\n" +
+                    "Connection: close\r\n\r\n"
+            output.write(corsResponse.toByteArray(StandardCharsets.UTF_8))
+            output.flush()
             return
-
         }
 
-        val cookie = qParams["cookie"] ?: ""
+        val qParams = parseQueryParams(query)
+        var targetUrl = qParams["url"] ?: ""
+        var cookie = qParams["cookie"] ?: ""
+
+        // Robust boundary parsing if query.split("&") truncated url with internal &query parameters
+        if (targetUrl.isEmpty() || !targetUrl.startsWith("http")) {
+            val urlIdx = query.indexOf("url=")
+            if (urlIdx != -1) {
+                val afterUrl = query.substring(urlIdx + 4)
+                val endIdx = listOf(afterUrl.indexOf("&cookie="), afterUrl.indexOf("&isAniFam=")).filter { it != -1 }.minOrNull() ?: -1
+                val rawUrl = if (endIdx != -1) afterUrl.substring(0, endIdx) else afterUrl
+                targetUrl = try { java.net.URLDecoder.decode(rawUrl, "UTF-8") } catch (_: Exception) { rawUrl }
+            }
+        }
+        if (cookie.isEmpty()) {
+            val cookieIdx = query.indexOf("cookie=")
+            if (cookieIdx != -1) {
+                val afterCookie = query.substring(cookieIdx + 7)
+                val endIdx = afterCookie.indexOf("&isAniFam=")
+                val rawCookie = if (endIdx != -1) afterCookie.substring(0, endIdx) else afterCookie
+                cookie = try { java.net.URLDecoder.decode(rawCookie, "UTF-8") } catch (_: Exception) { rawCookie }
+            }
+        }
+
+        if (targetUrl.isEmpty()) {
+            sendResponse(socket, 400, "{\"error\": \"Missing url parameter\"}")
+            return
+        }
+
+        val isAniFam = query.contains("isAniFam=true", ignoreCase = true) ||
+                qParams["isAniFam"]?.toBoolean() == true ||
+                targetUrl.contains("zokoanime", ignoreCase = true) ||
+                targetUrl.contains("dramahot", ignoreCase = true) ||
+                targetUrl.contains("anifam", ignoreCase = true) ||
+                targetUrl.contains("shiora", ignoreCase = true) ||
+                targetUrl.contains("embermeadow", ignoreCase = true) ||
+                targetUrl.contains("megaplay", ignoreCase = true) ||
+                targetUrl.contains("laggedduringcutscene", ignoreCase = true) ||
+                targetUrl.contains("anipixcdn", ignoreCase = true)
+
+        val clientHost = clientHeaders["host"]?.ifBlank { null }
+            ?: run {
+                val localIp = socket.localAddress?.hostAddress
+                if (!localIp.isNullOrBlank() && localIp != "0.0.0.0" && localIp != "::") {
+                    "$localIp:${socket.localPort}"
+                } else {
+                    "${com.example.cast.CastForegroundService.getWifiIpAddress()}:${socket.localPort}"
+                }
+            }
 
         val requestBuilder = Request.Builder().url(targetUrl)
 
-        requestBuilder.header("User-Agent", "MovieBox/4.0.02 (Android 14; Pixel 6)")
+        // Domain defaults for MovieBox / AniFam servers
+        var defaultUserAgent = if (isAniFam) "okhttp/4.12.0" else "MovieBox/4.0.02 (Android 14; Pixel 6)"
+        var defaultReferer: String? = null
+        var defaultOrigin: String? = null
+
+        if (isAniFam) {
+            when {
+                targetUrl.contains("shiora", ignoreCase = true) ||
+                targetUrl.contains("embermeadow", ignoreCase = true) ||
+                targetUrl.contains("megaplay", ignoreCase = true) ||
+                targetUrl.contains("laggedduringcutscene", ignoreCase = true) -> {
+                    defaultReferer = "https://megaplay.buzz/"
+                    defaultOrigin = "https://megaplay.buzz"
+                    defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+                }
+                targetUrl.contains("anipixcdn", ignoreCase = true) -> {
+                    defaultUserAgent = "okhttp/4.12.0"
+                }
+                else -> {
+                    defaultReferer = "https://zokoanime.video/"
+                    defaultOrigin = "https://zokoanime.video"
+                    defaultUserAgent = "okhttp/4.12.0"
+                }
+            }
+        }
+
+        // Parse custom headers passed from media_headers/cookie
+        val actualCookies = mutableListOf<String>()
+        var customUserAgent: String? = null
+        var customReferer: String? = null
+        var customOrigin: String? = null
 
         if (cookie.isNotBlank()) {
-            requestBuilder.header("Cookie", cookie)
+            cookie.split(";").forEach { rawPair ->
+                val pair = rawPair.trim()
+                if (pair.contains("=")) {
+                    val parts = pair.split("=", limit = 2)
+                    val k = parts[0].trim()
+                    val v = parts[1].trim()
+                    when {
+                        k.equals("User-Agent", ignoreCase = true) -> customUserAgent = v
+                        k.equals("Referer", ignoreCase = true) -> customReferer = v
+                        k.equals("Origin", ignoreCase = true) -> customOrigin = v
+                        else -> actualCookies.add("$k=$v")
+                    }
+                } else if (pair.isNotEmpty()) {
+                    actualCookies.add(pair)
+                }
+            }
+        }
 
+        val finalUserAgent = customUserAgent ?: defaultUserAgent
+        val finalReferer = customReferer ?: defaultReferer
+        val finalOrigin = customOrigin ?: defaultOrigin
+
+        requestBuilder.header("User-Agent", finalUserAgent)
+        if (!finalReferer.isNullOrBlank()) {
+            requestBuilder.header("Referer", finalReferer)
+        }
+        if (!finalOrigin.isNullOrBlank()) {
+            requestBuilder.header("Origin", finalOrigin)
+        }
+        if (actualCookies.isNotEmpty()) {
+            requestBuilder.header("Cookie", actualCookies.joinToString("; "))
         }
 
         val rangeHeader = clientHeaders["range"]
-
         if (!rangeHeader.isNullOrBlank()) {
             requestBuilder.header("Range", rangeHeader)
-
         }
 
         if (method.equals("HEAD", ignoreCase = true)) {
             requestBuilder.head()
-
         }
 
         try {
-            val response = okHttpClient.newCall(requestBuilder.build()).execute()
+            val response = castOkHttpClient.newCall(requestBuilder.build()).execute()
+            response.use { resp ->
+                val code = resp.code
+                val rawContentType = resp.header("Content-Type")
+                val effectiveUrl = resp.request.url.toString()
+                val isM3u8 = targetUrl.contains(".m3u8", ignoreCase = true) ||
+                        effectiveUrl.contains(".m3u8", ignoreCase = true) ||
+                        rawContentType?.contains("mpegurl", ignoreCase = true) == true ||
+                        rawContentType?.contains("m3u8", ignoreCase = true) == true
 
-            val output: OutputStream = socket.getOutputStream()
-
-            val code = response.code
-
-            val contentType = response.header("Content-Type") ?: if (targetUrl.contains(".m3u8")) "application/x-mpegURL" else "video/mp4"
-
-            val body = response.body
-
-            val contentLength = body?.contentLength() ?: -1L
-
-            val sb = StringBuilder()
-
-            sb.append("HTTP/1.1 ").append(code).append(" ").append(response.message.ifBlank { "OK" }).append("\r\n")
-
-            sb.append("Content-Type: ").append(contentType).append("\r\n")
-
-            if (contentLength >= 0) {
-                sb.append("Content-Length: ").append(contentLength).append("\r\n")
-
-            }
-
-            sb.append("Accept-Ranges: bytes\r\n")
-
-            response.header("Content-Range")?.let {
-                sb.append("Content-Range: ").append(it).append("\r\n")
-
-            }
-
-            sb.append("Access-Control-Allow-Origin: *\r\n")
-
-            sb.append("Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n")
-
-            sb.append("Access-Control-Allow-Headers: Range, Origin, Accept, Content-Type\r\n")
-
-            sb.append("Access-Control-Expose-Headers: Content-Length, Content-Range, Accept-Ranges\r\n")
-
-            sb.append("Connection: close\r\n\r\n")
-
-            output.write(sb.toString().toByteArray(StandardCharsets.UTF_8))
-
-            output.flush()
-
-            if (!method.equals("HEAD", ignoreCase = true) && body != null) {
-                val inputStream = body.byteStream()
-
-                val buffer = ByteArray(64 * 1024)
-
-                var bytesRead: Int
-
-                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                    output.write(buffer, 0, bytesRead)
-
+                val contentType = when {
+                    isM3u8 -> "application/x-mpegURL"
+                    rawContentType?.startsWith("image/", ignoreCase = true) == true ||
+                    rawContentType?.startsWith("text/", ignoreCase = true) == true -> "video/MP2T"
+                    rawContentType.isNullOrBlank() -> if (targetUrl.contains(".m3u8", ignoreCase = true)) "application/x-mpegURL" else "video/mp4"
+                    else -> rawContentType
                 }
 
+                val body = resp.body
+                if (isM3u8 && resp.isSuccessful && !method.equals("HEAD", ignoreCase = true) && body != null) {
+                    val rawContent = body.string()
+                    val rewritten = rewriteM3u8Playlist(rawContent, effectiveUrl, clientHost, isAniFam, cookie)
+                    val rewrittenBytes = rewritten.toByteArray(StandardCharsets.UTF_8)
+
+                    val sb = StringBuilder()
+                    sb.append("HTTP/1.1 ").append(code).append(" ").append(resp.message.ifBlank { "OK" }).append("\r\n")
+                    sb.append("Content-Type: application/x-mpegURL\r\n")
+                    sb.append("Content-Length: ").append(rewrittenBytes.size).append("\r\n")
+                    sb.append("Access-Control-Allow-Origin: *\r\n")
+                    sb.append("Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n")
+                    sb.append("Access-Control-Allow-Headers: Range, Origin, Accept, Content-Type, Authorization\r\n")
+                    sb.append("Access-Control-Expose-Headers: Content-Length, Content-Range, Accept-Ranges\r\n")
+                    sb.append("Connection: close\r\n\r\n")
+
+                    output.write(sb.toString().toByteArray(StandardCharsets.UTF_8))
+                    output.write(rewrittenBytes)
+                    output.flush()
+                    return
+                }
+
+                val contentLength = body?.contentLength() ?: -1L
+                val sb = StringBuilder()
+                sb.append("HTTP/1.1 ").append(code).append(" ").append(resp.message.ifBlank { "OK" }).append("\r\n")
+                sb.append("Content-Type: ").append(contentType).append("\r\n")
+                if (contentLength >= 0) {
+                    sb.append("Content-Length: ").append(contentLength).append("\r\n")
+                }
+                sb.append("Accept-Ranges: bytes\r\n")
+                resp.header("Content-Range")?.let {
+                    sb.append("Content-Range: ").append(it).append("\r\n")
+                }
+                sb.append("Access-Control-Allow-Origin: *\r\n")
+                sb.append("Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n")
+                sb.append("Access-Control-Allow-Headers: Range, Origin, Accept, Content-Type, Authorization\r\n")
+                sb.append("Access-Control-Expose-Headers: Content-Length, Content-Range, Accept-Ranges\r\n")
+                sb.append("Connection: close\r\n\r\n")
+
+                output.write(sb.toString().toByteArray(StandardCharsets.UTF_8))
                 output.flush()
 
+                if (!method.equals("HEAD", ignoreCase = true) && body != null) {
+                    val inputStream = body.byteStream()
+                    val buffer = ByteArray(64 * 1024)
+                    var bytesRead: Int
+                    try {
+                        while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                            output.write(buffer, 0, bytesRead)
+                        }
+                        output.flush()
+                    } catch (_: Exception) {
+                        // Client TV closed or paused socket (e.g. seek, cancel) - clean exit
+                    }
+                }
             }
-
-            response.close()
-
         } catch (e: Exception) {
             Log.e("LocalMovieBoxServer", "Cast proxy stream error: ${e.message}")
-
         }
+    }
 
+    private fun resolveUrl(base: String, relativeOrAbsolute: String): String {
+        val trimmed = relativeOrAbsolute.trim()
+        val resolved = try {
+            val baseUri = java.net.URI(base)
+            baseUri.resolve(trimmed).toString()
+        } catch (_: Exception) {
+            if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+                trimmed
+            } else {
+                val baseNoQuery = base.substringBefore("?")
+                val lastSlash = baseNoQuery.lastIndexOf('/')
+                if (lastSlash != -1) {
+                    baseNoQuery.substring(0, lastSlash + 1) + trimmed
+                } else {
+                    trimmed
+                }
+            }
+        }
+        val baseQuery = base.substringAfter('?', "")
+        return if (baseQuery.isNotEmpty() && !trimmed.startsWith("http://") && !trimmed.startsWith("https://") && !resolved.contains("?")) {
+            "$resolved?$baseQuery"
+        } else {
+            resolved
+        }
+    }
+
+    private fun rewriteM3u8Playlist(
+        playlistContent: String,
+        targetUrl: String,
+        clientHost: String,
+        isAniFam: Boolean,
+        cookie: String
+    ): String {
+        val proxyBase = "http://$clientHost/cast-proxy"
+        val encodedCookie = if (cookie.isNotBlank()) java.net.URLEncoder.encode(cookie, "UTF-8") else ""
+        val cookieParam = if (encodedCookie.isNotEmpty()) "&cookie=$encodedCookie" else ""
+        val aniFamParam = if (isAniFam) "&isAniFam=true" else ""
+
+        val sb = StringBuilder()
+        playlistContent.lines().forEach { line ->
+            val trimmed = line.trim()
+            if (trimmed.isEmpty()) {
+                sb.append("\n")
+            } else if (trimmed.startsWith("#")) {
+                if (trimmed.contains("URI=", ignoreCase = true)) {
+                    val replacedLine = Regex("""URI=["']?([^"',\s>]+)["']?""", RegexOption.IGNORE_CASE).replace(trimmed) { matchResult ->
+                        val originalUri = matchResult.groupValues[1]
+                        val resolved = resolveUrl(targetUrl, originalUri)
+                        val proxied = "$proxyBase?url=${java.net.URLEncoder.encode(resolved, "UTF-8")}$aniFamParam$cookieParam"
+                        """URI="$proxied""""
+                    }
+                    sb.append(replacedLine).append("\n")
+                } else {
+                    sb.append(line).append("\n")
+                }
+            } else {
+                val resolved = resolveUrl(targetUrl, trimmed)
+                val proxied = "$proxyBase?url=${java.net.URLEncoder.encode(resolved, "UTF-8")}$aniFamParam$cookieParam"
+                sb.append(proxied).append("\n")
+            }
+        }
+        return sb.toString()
     }
 
      private fun sendResponse(socket: Socket, statusCode: Int, body: String, contentType: String = "application/json; charset=utf-8") {
@@ -824,7 +1023,7 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
                         if (base64Str.isNotEmpty()) {
                             val decodedBytes = android.util.Base64.decode(base64Str, android.util.Base64.NO_WRAP)
 
-                            val file = java.io.File(context.filesDir, "avatar.jpg")
+                            val file = java.io.File(context.filesDir, "moviebox_avatar.jpg")
 
                             file.outputStream().use { out ->
 
@@ -832,7 +1031,7 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
 
                             }
 
-                            Pair(200, "{\"status\": \"success\", \"url\": \"file://${context.filesDir.absolutePath}/avatar.jpg\"}")
+                            Pair(200, "{\"status\": \"success\", \"url\": \"file://${context.filesDir.absolutePath}/moviebox_avatar.jpg\"}")
 
                         } else {
                             Pair(400, "{\"status\": \"error\", \"message\": \"Image data is empty\"}")
@@ -846,9 +1045,9 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
 
                 }
 
-                path == "/uploads/avatar.jpg" -> {
+                path == "/uploads/avatar.jpg" || path == "/uploads/moviebox_avatar.jpg" -> {
                     try {
-                        val file = java.io.File(context.filesDir, "avatar.jpg")
+                        val file = java.io.File(context.filesDir, "moviebox_avatar.jpg").let { if (it.exists()) it else java.io.File(context.filesDir, "avatar.jpg") }
 
                         if (file.exists()) {
                             val bytes = file.readBytes()
@@ -969,6 +1168,54 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
 
                     }
 
+                }
+
+                path == "/ranking-list" || path == "/wefeed-mobile-bff/tab/ranking-list" -> {
+                    try {
+                        val tabId = qParams["tabId"] ?: "2"
+                        val categoryType = qParams["categoryType"] ?: qParams["category"] ?: "all"
+                        val rankingListId = qParams["rankingListId"] ?: ""
+                        val page = qParams["page"] ?: "1"
+                        val perPage = qParams["perPage"] ?: qParams["pageSize"] ?: "100"
+
+                        val queryMap = mutableMapOf(
+                            "tabId" to tabId,
+                            "categoryType" to categoryType,
+                            "page" to page,
+                            "perPage" to perPage
+                        )
+                        if (rankingListId.isNotEmpty()) {
+                            queryMap["rankingListId"] = rankingListId
+                        }
+
+                        val rawResponse = makeOfficialRequest("GET", "/wefeed-mobile-bff/tab/ranking-list", queryMap)
+                        val responseMap = parseJsonToMap(rawResponse)
+                        val dataMap = responseMap["data"] as? Map<String, Any?>
+                        val list = (dataMap?.get("subjects") ?: dataMap?.get("list") ?: dataMap?.get("items")) as? List<Map<String, Any?>> ?: emptyList()
+                        val mapped = list.mapNotNull { mapItem(it) }
+
+                        val responseBody = mapOf(
+                            "code" to 0,
+                            "message" to "ok",
+                            "data" to mapOf(
+                                "title" to (dataMap?.get("title") ?: "Rankings"),
+                                "list" to mapped,
+                                "items" to mapped
+                            )
+                        )
+                        Pair(200, toJsonString(responseBody))
+                    } catch (e: Exception) {
+                        Log.e("LocalMovieBoxServer", "RankingList error: ${e.message}")
+                        val responseBody = mapOf(
+                            "code" to 0,
+                            "message" to "error",
+                            "data" to mapOf(
+                                "list" to emptyList<Map<String, Any?>>(),
+                                "items" to emptyList<Map<String, Any?>>()
+                            )
+                        )
+                        Pair(200, toJsonString(responseBody))
+                    }
                 }
 
                 path == "/discovery" -> {
@@ -2796,16 +3043,15 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
                 val mapped = realMovies.mapNotNull { mapItem(it) }
 
                 if (mapped.isNotEmpty()) {
+                    val dl = (row["deepLink"] ?: "").toString()
+                    val rId = (row["rankingListId"] ?: "").toString()
                     sections.add(mapOf(
-
                         "title" to title,
-
                         "type" to (row["subjectType"] ?: row["type"] ?: "SUBJECTS_MOVIE"),
-
-                        "items" to mapped
-
+                        "items" to mapped,
+                        "deepLink" to dl,
+                        "rankingListId" to rId
                     ))
-
                 }
 
             }
@@ -2997,7 +3243,15 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
 
         val region = prefs.getString("custom_local_iso", "")?.takeIf { it.isNotEmpty() }?.uppercase() ?: "IN"
 
-        val timezone = if (region == "US") "America/New_York" else if (region == "BR") "America/Sao_Paulo" else if (region == "RU") "Europe/Moscow" else "Asia/Kolkata"
+        val timezone = when (region) {
+            "US" -> "America/New_York"
+            "BR" -> "America/Sao_Paulo"
+            "RU" -> "Europe/Moscow"
+            "FR" -> "Europe/Paris"
+            "BE" -> "Europe/Brussels"
+            "IT" -> "Europe/Rome"
+            else -> "Asia/Kolkata"
+        }
 
         val isCacheable = (method == "GET" && !endpoint.contains("profile") && !endpoint.contains("see-list-v2") && !endpoint.contains("tab-operating")) || endpoint.contains("/subject-api/get") || endpoint.contains("/subject-api/trending") || endpoint.contains("/subject-api/top-rec") || endpoint.contains("/subject-api/search") || endpoint.contains("/subject-api/search-rank") || endpoint.contains("/subject-api/season-info") || endpoint.contains("/subject-api/play-info") || endpoint.contains("/subject-api/get-ext-captions")
 
@@ -3127,6 +3381,14 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
 
         } else null
 
+        val lang = when (region) {
+            "BR" -> "pt"
+            "RU" -> "ru"
+            "FR", "BE" -> "fr"
+            "IT" -> "it"
+            else -> "en"
+        }
+
         val clientInfoMap = mapOf(
 
             "package_name" to "com.community.oneroom",
@@ -3151,7 +3413,7 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
 
             "model" to "Pixel 6",
 
-            "system_language" to "en",
+            "system_language" to lang,
 
             "net" to "wifi",
 
@@ -3173,6 +3435,12 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
             "BR" -> "pt-BR,pt;q=0.9,en;q=0.8"
 
             "RU" -> "ru-RU,ru;q=0.9,en;q=0.8"
+
+            "FR" -> "fr-FR,fr;q=0.9,en;q=0.8"
+
+            "BE" -> "fr-BE,nl-BE,en;q=0.8"
+
+            "IT" -> "it-IT,it;q=0.9,en;q=0.8"
 
             else -> "en-US,en;q=0.9"
 
@@ -3196,7 +3464,7 @@ class LocalMovieBoxServer(private val context: Context, private val port: Int = 
 
             .header("region", region)
 
-            .header("lang", if (region == "BR") "pt" else if (region == "RU") "ru" else "en")
+            .header("lang", lang)
 
             .header("os", "android")
 
