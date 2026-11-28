@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/solo12345689/AnyFilm/releases"><img src="https://img.shields.io/badge/Version-v4.6-red.svg?style=for-the-badge&logo=android" alt="Version 4.6"/></a>
+  <a href="https://github.com/solo12345689/AnyFilm/releases"><img src="https://img.shields.io/badge/Version-v4.7-red.svg?style=for-the-badge&logo=android" alt="Version 4.7"/></a>
   <a href="https://github.com/solo12345689/AnyFilm"><img src="https://img.shields.io/badge/Kotlin-2.0-blue.svg?style=for-the-badge&logo=kotlin" alt="Kotlin"/></a>
   <a href="https://developer.android.com/jetpack/compose"><img src="https://img.shields.io/badge/Jetpack_Compose-Material_3-green.svg?style=for-the-badge&logo=jetpackcompose" alt="Compose"/></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge" alt="License"/></a>
